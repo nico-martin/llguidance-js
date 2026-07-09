@@ -1,8 +1,8 @@
 const textEncoder = new TextEncoder();
 
 export function extractLLGuidanceTokenizerConfig(tokenizer) {
-  if (!tokenizer || typeof tokenizer !== 'object') {
-    throw new TypeError('tokenizer must be an object');
+  if (!tokenizer || (typeof tokenizer !== 'object' && typeof tokenizer !== 'function')) {
+    throw new TypeError('tokenizer must be an object or callable tokenizer');
   }
 
   if (Array.isArray(tokenizer.tokens)) {

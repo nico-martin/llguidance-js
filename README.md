@@ -59,6 +59,65 @@ const interpreter = runtime.createInterpreter({
 
 The runtime will try to extract the raw token byte vocabulary from common Hugging Face tokenizer shapes, including Transformers.js tokenizer JSON and `getVocab()`/`tokenToId()` style APIs.
 
+### Hugging Face Tokenizers
+
+Use the exact tokenizer instance used by your model. The token ids sampled by the LLM are the ids passed to `interpreter.commitToken(tokenId)`, so the tokenizer vocabulary must match the model vocabulary exactly.
+
+With Transformers.js, pass the loaded tokenizer directly. Transformers.js tokenizers are callable objects; llguidance supports that shape and will inspect the tokenizer's metadata without requiring a wrapper/facade.
+
+```js
+import { AutoTokenizer } from "@huggingface/transformers";
+import { loadBundledLLGuidance } from "llguidance";
+
+const tokenizer = await AutoTokenizer.from_pretrained("Xenova/gpt2");
+const runtime = await loadBundledLLGuidance();
+
+const interpreter = runtime.createInterpreter({
+  tokenizer,
+  response_format: { type: "json_object" },
+});
+```
+
+The bridge looks for common Transformers.js fields and methods on the callable tokenizer, including `_tokenizerJSON`, `get_vocab()`, `token_to_id()`, `eos_token_id`, `bos_token_id`, and `all_special_ids`.
+
+With `@huggingface/tokenizers`, pass the tokenizer object if it exposes tokenizer JSON, `getVocab()`, or `idToToken()`/`getVocabSize()`:
+
+```js
+import { Tokenizer } from "@huggingface/tokenizers";
+import { loadBundledLLGuidance } from "llguidance";
+
+const tokenizer = await Tokenizer.fromFile("tokenizer.json");
+const runtime = await loadBundledLLGuidance();
+
+const interpreter = runtime.createInterpreter({
+  tokenizer,
+  response_format: {
+    type: "json_schema",
+    json_schema: {
+      type: "object",
+      properties: {
+        answer: { type: "string" },
+      },
+      required: ["answer"],
+      additionalProperties: false,
+    },
+  },
+});
+```
+
+Internally, llguidance needs raw token bytes, not decoded text. The bridge handles common Hugging Face formats, including byte-level BPE tokens like `Ġword`, SentencePiece-style tokens like `▁word`, byte fallback tokens like `<0xFF>`, and added/special tokens.
+
+If automatic extraction fails, build the tokenizer config yourself and pass it to `runtime.createTokenizer()`:
+
+```js
+const llgTokenizer = runtime.createTokenizer({
+  tokens: rawTokenBytesById,
+  eos_token_id,
+  bos_token_id,
+  special_token_ids,
+});
+```
+
 You can also create an llguidance tokenizer explicitly:
 
 ```js

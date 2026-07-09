@@ -127,6 +127,34 @@ test('supports idToToken plus vocab size APIs', () => {
   assert.deepEqual(config.tokens, [[97], [98]]);
 });
 
+test('supports callable Transformers.js tokenizer objects', () => {
+  function tokenizer() {}
+  tokenizer._tokenizerJSON = {
+    model: {
+      vocab: {
+        'Ġhello': 0,
+        '</s>': 1,
+      },
+    },
+    decoder: { type: 'ByteLevel' },
+    added_tokens: [{ id: 1, content: '</s>', special: true }],
+  };
+  tokenizer.get_vocab = () => tokenizer._tokenizerJSON.model.vocab;
+  tokenizer.decode = () => '';
+  tokenizer.token_to_id = (token) => tokenizer._tokenizerJSON.model.vocab[token];
+  tokenizer.eos_token_id = 1;
+  tokenizer.bos_token_id = 0;
+  tokenizer.all_special_ids = [1];
+
+  const config = extractLLGuidanceTokenizerConfig(tokenizer);
+
+  assert.deepEqual(config.tokens[0], [32, 104, 101, 108, 108, 111]);
+  assert.deepEqual(config.tokens[1], [60, 47, 115, 62]);
+  assert.equal(config.eosTokenId, 1);
+  assert.equal(config.bosTokenId, 0);
+  assert.deepEqual(config.specialTokenIds, [0, 1]);
+});
+
 test('resolves eos and bos ids from token strings', () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
@@ -144,6 +172,13 @@ test('throws a useful error when no vocab can be extracted', () => {
   assert.throws(
     () => extractLLGuidanceTokenizerConfig({}),
     /Could not extract tokenizer vocabulary/,
+  );
+});
+
+test('throws a useful error for invalid tokenizer values', () => {
+  assert.throws(
+    () => extractLLGuidanceTokenizerConfig(null),
+    /object or callable tokenizer/,
   );
 });
 
