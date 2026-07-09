@@ -37,18 +37,41 @@ function normalizeTokenizerConfig(config) {
 }
 
 function getTokenizerJSON(tokenizer) {
-  if (tokenizer._tokenizerJSON) return tokenizer._tokenizerJSON;
-  if (tokenizer.tokenizerJSON) return tokenizer.tokenizerJSON;
-  if (tokenizer.tokenizer_json) return tokenizer.tokenizer_json;
-  if (tokenizer.json) return typeof tokenizer.json === 'function' ? tokenizer.json() : tokenizer.json;
-  return undefined;
+  const json = tokenizer._tokenizerJSON
+    ?? tokenizer.tokenizerJSON
+    ?? tokenizer.tokenizer_json
+    ?? (typeof tokenizer.json === 'function' ? tokenizer.json() : tokenizer.json);
+  return typeof json === 'string' ? JSON.parse(json) : json;
 }
 
 function getVocab(tokenizer, tokenizerJSON) {
-  if (tokenizerJSON?.model?.vocab) return tokenizerJSON.model.vocab;
-  if (typeof tokenizer.getVocab === 'function') return tokenizer.getVocab(true);
-  if (typeof tokenizer.get_vocab === 'function') return tokenizer.get_vocab(true);
-  if (tokenizer.vocab) return tokenizer.vocab;
+  if (tokenizerJSON?.model?.vocab) return vocabToObject(tokenizerJSON.model.vocab);
+  if (typeof tokenizer.getVocab === 'function') return vocabToObject(tokenizer.getVocab(true));
+  if (typeof tokenizer.get_vocab === 'function') return vocabToObject(tokenizer.get_vocab(true));
+  if (tokenizer.vocab) return vocabToObject(tokenizer.vocab);
+  if (typeof tokenizer.idToToken === 'function' || typeof tokenizer.id_to_token === 'function') {
+    const vocabSize = getVocabSize(tokenizer);
+    if (Number.isInteger(vocabSize)) {
+      const vocab = {};
+      for (let id = 0; id < vocabSize; ++id) {
+        const token = tokenizer.idToToken?.(id) ?? tokenizer.id_to_token?.(id);
+        if (typeof token === 'string') vocab[token] = id;
+      }
+      return vocab;
+    }
+  }
+  return undefined;
+}
+
+function vocabToObject(vocab) {
+  return vocab instanceof Map ? Object.fromEntries(vocab) : vocab;
+}
+
+function getVocabSize(tokenizer) {
+  if (Number.isInteger(tokenizer.vocabSize)) return tokenizer.vocabSize;
+  if (Number.isInteger(tokenizer.vocab_size)) return tokenizer.vocab_size;
+  if (typeof tokenizer.getVocabSize === 'function') return tokenizer.getVocabSize(true);
+  if (typeof tokenizer.get_vocab_size === 'function') return tokenizer.get_vocab_size(true);
   return undefined;
 }
 
@@ -121,7 +144,7 @@ function tokenStringToId(tokenizer, tokenizerJSON, token) {
   if (typeof tokenizer.tokenToId === 'function') return tokenizer.tokenToId(token);
   if (typeof tokenizer.token_to_id === 'function') return tokenizer.token_to_id(token);
   const vocab = getVocab(tokenizer, tokenizerJSON);
-  const id = vocab?.[token];
+  const id = Number(vocab?.[token]);
   return Number.isInteger(id) ? id : undefined;
 }
 

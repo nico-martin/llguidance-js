@@ -1,9 +1,12 @@
-export { extractLLGuidanceTokenizerConfig } from './tokenizer_bridge.js';
 import { extractLLGuidanceTokenizerConfig } from './tokenizer_bridge.js';
 
 export async function loadBundledLLGuidance() {
-  const mod = await import('./wasm/llguidance_wasm.js');
-  await mod.default();
+  const wasmModule = await import('./wasm/llguidance_wasm.js');
+  await wasmModule.default();
+  return createLLGuidanceRuntime(wasmModule);
+}
+
+export function createLLGuidanceRuntime(mod) {
   const llguidanceTokenizers = new WeakSet();
 
   const createTokenizer = (config) => {

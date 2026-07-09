@@ -33,5 +33,5 @@ target/
 **/target/
 
 # wasm-pack generated files
-src/generation/grammar/wasm/*
-!src/generation/grammar/wasm/.gitkeep
+src/wasm/*
+!src/wasm/.gitkeep

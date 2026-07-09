@@ -1,6 +1,6 @@
 {
   "name": "llguidance",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Browser and Node.js WASM bindings for llguidance constrained decoding.",
   "private": true,
   "type": "module",
@@ -17,9 +17,22 @@
     "registry": "https://registry.npmjs.org"
   },
   "scripts": {
-    "build:llguidance-wasm": "PATH=/opt/homebrew/opt/rustup/bin:$PATH RUSTUP_TOOLCHAIN=1.88.0 wasm-pack build rust/llguidance-wasm --target web --release --out-dir ../../src/generation/grammar/wasm --out-name llguidance_wasm",
-    "build:llguidance-wasm:dev": "PATH=/opt/homebrew/opt/rustup/bin:$PATH RUSTUP_TOOLCHAIN=1.88.0 wasm-pack build rust/llguidance-wasm --target web --dev --out-dir ../../src/generation/grammar/wasm --out-name llguidance_wasm",
+    "build:llguidance-wasm": "node scripts/build-llguidance-wasm.mjs --release",
+    "build:llguidance-wasm:dev": "node scripts/build-llguidance-wasm.mjs --dev",
+    "build:js": "node scripts/build-js.mjs",
     "build:dist": "node scripts/build-dist.mjs",
+    "test": "node --test",
     "publish": "node scripts/publish.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "prettier": "^3.9.4"
   }
 }

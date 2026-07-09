@@ -4,6 +4,18 @@ use serde_json::{json, Value};
 use toktrie::{ApproximateTokEnv, TokEnv, TokRxInfo, TokTrie};
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[no_mangle]
+unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom::Error> {
+    for idx in 0..len {
+        *dest.add(idx) = (idx as u8).wrapping_mul(31).wrapping_add(17);
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TokenizerConfig {

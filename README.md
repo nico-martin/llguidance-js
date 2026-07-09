@@ -7,7 +7,7 @@ This package loads a bundled WebAssembly build of llguidance and exposes a small
 ## Install
 
 ```bash
-npm install llguidance
+pnpm add llguidance
 ```
 
 ## Basic Usage
@@ -136,19 +136,19 @@ Returns `{ stop, backtrack, ffTokens }`.
 Build a fast development WASM artifact:
 
 ```bash
-npm run build:llguidance-wasm:dev
+pnpm run build:llguidance-wasm:dev
 ```
 
 Build the release artifact and stage the npm package in `dist/`:
 
 ```bash
-npm run build:dist
+pnpm run build:dist
 ```
 
 Publish with an npm one-time password:
 
 ```bash
-npm run publish <otp> [patch|minor|major]
+pnpm run publish <otp> [patch|minor|major]
 ```
 
 The publish script bumps the root `package.json` version, rebuilds `dist/`, and publishes the staged package to npm as `llguidance`.

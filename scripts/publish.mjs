@@ -9,7 +9,7 @@ const packageJsonPath = "package.json";
 const distPackageJsonPath = "dist/package.json";
 
 if (!otp || !allowedVersionBumps.has(versionBump)) {
-  console.error("Usage: npm run publish <otp> [patch|minor|major]");
+  console.error("Usage: pnpm run publish <otp> [patch|minor|major]");
   process.exit(1);
 }
 
@@ -47,7 +47,7 @@ const bumpPackageVersion = async () => {
 
 run("npm", ["whoami", "--registry", registry]);
 await bumpPackageVersion();
-run("npm", ["run", "build:dist"]);
+run("pnpm", ["run", "build:dist"]);
 
 const packageJson = JSON.parse(await readFile(distPackageJsonPath, "utf8"));
 
