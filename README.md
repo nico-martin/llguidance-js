@@ -44,6 +44,21 @@ const tokenId = 0;
 const result = interpreter.commitToken(tokenId);
 ```
 
+### Browser Bundlers And WASM URLs
+
+The browser build uses a bundler-resolved WASM URL internally, so Vite/Rollup-style apps can usually call `loadBundledLLGuidance()` directly.
+
+If your bundler needs explicit asset wiring, pass the WASM URL yourself:
+
+```js
+import { loadBundledLLGuidance } from "llguidance";
+import wasmUrl from "llguidance/wasm/llguidance_wasm_bg.wasm?url";
+
+const runtime = await loadBundledLLGuidance({ wasmUrl });
+```
+
+`wasmUrl` may be a `string`, `URL`, `Request`, `Response`, `BufferSource`, or `WebAssembly.Module` accepted by wasm-bindgen's initializer.
+
 The tokenizer must be the same tokenizer used by the LLM during inference. llguidance constrains model token ids, so its vocabulary must match the model vocabulary exactly.
 
 ## Tokenizers

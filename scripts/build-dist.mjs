@@ -46,7 +46,11 @@ await writeFile(
     `  createTokenizer(config?: Record<string, unknown>): unknown;\n` +
     `  createInterpreter(config: { tokenizer: unknown; response_format: Record<string, unknown> }): unknown;\n` +
     `}\n\n` +
-    `export function loadBundledLLGuidance(): Promise<LLGuidanceRuntime>;\n`,
+    `export type LLGuidanceWasmInput = string | URL | Request | Response | BufferSource | WebAssembly.Module;\n\n` +
+    `export interface LoadBundledLLGuidanceOptions {\n` +
+    `  wasmUrl?: LLGuidanceWasmInput;\n` +
+    `}\n\n` +
+    `export function loadBundledLLGuidance(options?: LoadBundledLLGuidanceOptions): Promise<LLGuidanceRuntime>;\n`,
 );
 
 await writeFile(

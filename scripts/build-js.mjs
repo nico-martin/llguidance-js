@@ -5,7 +5,7 @@ const common = {
   format: 'esm',
   sourcemap: true,
   target: 'es2022',
-  external: ['./wasm/llguidance_wasm.js'],
+  external: ['./wasm/llguidance_wasm.js', './wasm/llguidance_wasm_bg.wasm?url'],
   logLevel: 'info',
 };
 
