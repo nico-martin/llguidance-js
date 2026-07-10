@@ -42,13 +42,25 @@ run("pnpm", ["run", "build:js"]);
 
 await writeFile(
   new URL("llguidance.d.ts", distDir),
+    `export type LLGuidanceResponseFormat =\n` +
+    `  | { type: "json_object" }\n` +
+    `  | { type: "json_schema"; json_schema: Record<string, unknown> }\n` +
+    `  | { type: "regex"; regex: string };\n\n` +
     `export interface LLGuidanceRuntime {\n` +
     `  createTokenizer(config?: Record<string, unknown>): unknown;\n` +
-    `  createInterpreter(config: { tokenizer: unknown; response_format: Record<string, unknown> }): unknown;\n` +
+    `  createInterpreter(config: { tokenizer: unknown; response_format: LLGuidanceResponseFormat }): unknown;\n` +
     `}\n\n` +
     `export type LLGuidanceWasmInput = string | URL | Request | Response | BufferSource | WebAssembly.Module;\n\n` +
+    `export interface LLGuidanceWasmFactory {\n` +
+    `  default(options?: { module_or_path?: LLGuidanceWasmInput }): Promise<unknown>;\n` +
+    `  LLGuidanceTokenizer: new (config?: Record<string, unknown>) => unknown;\n` +
+    `  LLGuidanceInterpreter: new (tokenizer: unknown, config: Record<string, unknown>) => unknown;\n` +
+    `}\n\n` +
     `export interface LoadBundledLLGuidanceOptions {\n` +
+    `  wasm?: LLGuidanceWasmInput;\n` +
     `  wasmUrl?: LLGuidanceWasmInput;\n` +
+    `  wasmFactory?: LLGuidanceWasmFactory | Promise<LLGuidanceWasmFactory> | (() => LLGuidanceWasmFactory | Promise<LLGuidanceWasmFactory>);\n` +
+    `  wasmFactoryUrl?: string | URL;\n` +
     `}\n\n` +
     `export function loadBundledLLGuidance(options?: LoadBundledLLGuidanceOptions): Promise<LLGuidanceRuntime>;\n`,
 );

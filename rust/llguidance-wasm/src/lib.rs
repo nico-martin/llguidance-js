@@ -37,6 +37,8 @@ enum ResponseFormat {
     JsonObject,
     #[serde(rename = "json_schema")]
     JsonSchema { json_schema: Value },
+    #[serde(rename = "regex")]
+    Regex { regex: String },
 }
 
 #[wasm_bindgen]
@@ -182,6 +184,7 @@ fn grammar_from_response_format(format: ResponseFormat) -> TopLevelGrammar {
     match format {
         ResponseFormat::JsonObject => TopLevelGrammar::from_json_schema(json!({ "type": "object" })),
         ResponseFormat::JsonSchema { json_schema } => TopLevelGrammar::from_json_schema(json_schema),
+        ResponseFormat::Regex { regex } => TopLevelGrammar::from_regex(&regex),
     }
 }
 

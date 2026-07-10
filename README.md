@@ -3,6 +3,7 @@
 Browser and Node.js WASM bindings for [`guidance-ai/llguidance`](https://github.com/guidance-ai/llguidance).
 
 This package loads a bundled WebAssembly build of llguidance and exposes a small JavaScript runtime for constrained decoding with `json_object` and `json_schema` response formats.
+It also supports regex constraints.
 
 ## Install
 
@@ -48,16 +49,48 @@ const result = interpreter.commitToken(tokenId);
 
 The browser build uses a bundler-resolved WASM URL internally, so Vite/Rollup-style apps can usually call `loadBundledLLGuidance()` directly.
 
-If your bundler needs explicit asset wiring, pass the WASM URL yourself:
+If your bundler needs explicit asset wiring, pass the WASM source yourself:
 
 ```js
 import { loadBundledLLGuidance } from "llguidance";
 import wasmUrl from "llguidance/wasm/llguidance_wasm_bg.wasm?url";
 
-const runtime = await loadBundledLLGuidance({ wasmUrl });
+const runtime = await loadBundledLLGuidance({ wasm: wasmUrl });
 ```
 
-`wasmUrl` may be a `string`, `URL`, `Request`, `Response`, `BufferSource`, or `WebAssembly.Module` accepted by wasm-bindgen's initializer.
+`wasm` may be a `string`, `URL`, `Request`, `Response`, `BufferSource`, or `WebAssembly.Module` accepted by wasm-bindgen's initializer. `wasmUrl` is also accepted as an alias for compatibility.
+
+You can also load the wasm-bindgen JS factory yourself, including from a blob URL, CDN URL, service worker cache, or other application-managed source:
+
+```js
+import { loadBundledLLGuidance } from "llguidance";
+
+const [factorySource, wasmBytes] = await Promise.all([
+  caches.open("models").then(async (cache) => (await cache.match("/llguidance_wasm.js")).text()),
+  caches.open("models").then(async (cache) => (await cache.match("/llguidance_wasm_bg.wasm")).arrayBuffer()),
+]);
+
+const wasmFactoryUrl = URL.createObjectURL(
+  new Blob([factorySource], { type: "text/javascript" }),
+);
+
+const runtime = await loadBundledLLGuidance({
+  wasmFactoryUrl,
+  wasm: wasmBytes,
+});
+```
+
+If you already have the factory module namespace, pass it directly:
+
+```js
+import { loadBundledLLGuidance } from "llguidance";
+import * as wasmFactory from "llguidance/wasm/llguidance_wasm.js";
+
+const runtime = await loadBundledLLGuidance({
+  wasmFactory,
+  wasm: wasmBytesOrUrl,
+});
+```
 
 The tokenizer must be the same tokenizer used by the LLM during inference. llguidance constrains model token ids, so its vocabulary must match the model vocabulary exactly.
 
@@ -163,11 +196,32 @@ const interpreter = runtime.createInterpreter({
 });
 ```
 
+## Regex Mode
+
+Regex constraints use Rust regex syntax as accepted by upstream llguidance.
+
+```js
+const interpreter = runtime.createInterpreter({
+  tokenizer,
+  response_format: {
+    type: "regex",
+    regex: "[a-z]+",
+  },
+});
+```
+
 ## API
 
 ### `loadBundledLLGuidance()`
 
-Loads the bundled WASM module and returns a runtime object.
+Loads the WASM module and returns a runtime object.
+
+Options:
+
+- `wasm`: WASM binary source passed to wasm-bindgen, such as a URL, `Response`, bytes, or `WebAssembly.Module`.
+- `wasmUrl`: alias for `wasm`.
+- `wasmFactory`: wasm-bindgen JS factory module namespace, promise, or function returning one.
+- `wasmFactoryUrl`: URL for the wasm-bindgen JS factory module, including `blob:` URLs.
 
 ### `runtime.createTokenizer(config)`
 
@@ -187,7 +241,7 @@ Creates a constrained decoding interpreter.
 Supported config fields:
 
 - `tokenizer`: tokenizer returned by `createTokenizer`, or a compatible existing tokenizer object.
-- `response_format`: `{ type: "json_object" }` or `{ type: "json_schema", json_schema }`.
+- `response_format`: `{ type: "json_object" }`, `{ type: "json_schema", json_schema }`, or `{ type: "regex", regex }`.
 
 ### `interpreter.computeMask()`
 
