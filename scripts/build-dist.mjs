@@ -46,9 +46,57 @@ await writeFile(
     `  | { type: "json_object" }\n` +
     `  | { type: "json_schema"; json_schema: Record<string, unknown> }\n` +
     `  | { type: "regex"; regex: string };\n\n` +
+    `export type LLGuidanceGrammarFormat = "lark" | "json_schema" | "json" | "json_object" | "regex" | "choice" | "llguidance" | "guidance";\n\n` +
+    `export interface LLTokenizer {\n` +
+    `  readonly vocab_size: number;\n` +
+    `  readonly eos_token: number;\n` +
+    `  readonly eos_tokens: number[];\n` +
+    `  readonly is_canonical: boolean;\n` +
+    `}\n\n` +
+    `export interface LLInterpreter {\n` +
+    `  compute_mask(): [Uint8Array | null, string];\n` +
+    `  compute_mask_into(target: Uint8Array): string;\n` +
+    `  commit_token(sampledToken: number | null | undefined): [number, number[]];\n` +
+    `  is_accepting(): boolean;\n` +
+    `  stop_reason(): string;\n` +
+    `  has_pending_stop(): boolean;\n` +
+    `  computeMask(): unknown;\n` +
+    `  commitToken(sampledToken: number): unknown;\n` +
+    `}\n\n` +
+    `export interface LLMatcher {\n` +
+    `  compute_bitmask(): Uint8Array;\n` +
+    `  compute_logit_bias(): Uint8Array;\n` +
+    `  consume_token(sampledToken: number): boolean;\n` +
+    `  consume_tokens(sampledTokens: number[]): boolean;\n` +
+    `  try_consume_tokens(sampledTokens: number[]): number;\n` +
+    `  validate_tokens(sampledTokens: number[]): number;\n` +
+    `  reset(): boolean;\n` +
+    `  is_error(): boolean;\n` +
+    `  get_error(): string;\n` +
+    `  is_accepting(): boolean;\n` +
+    `  is_stopped(): boolean;\n` +
+    `  stop_reason(): string;\n` +
+    `}\n\n` +
     `export interface LLGuidanceRuntime {\n` +
+    `  LLTokenizer: new (tokenizerOrConfig?: unknown, options?: Record<string, unknown>) => LLTokenizer;\n` +
+    `  LLInterpreter: new (tokenizer: unknown, grammarOrConfig: string | Record<string, unknown>, options?: Record<string, unknown>) => LLInterpreter;\n` +
+    `  LLMatcher: {\n` +
+    `    new (tokenizer: unknown, grammar: string, options?: Record<string, unknown>): LLMatcher;\n` +
+    `    grammar_from_json_schema(schema: string | Record<string, unknown>): string;\n` +
+    `    grammar_from_lark(lark: string): string;\n` +
+    `    grammar_from_regex(regex: string): string;\n` +
+    `    validate_grammar(grammar: string, tokenizer?: unknown): string;\n` +
+    `    validate_grammar_with_warnings(grammar: string, tokenizer?: unknown): [boolean, string[]];\n` +
+    `  };\n` +
+    `  JsonCompiler: new (options?: Record<string, unknown>) => { compile(schema: string | Record<string, unknown>): string };\n` +
+    `  LarkCompiler: new () => { compile(lark: string): string };\n` +
+    `  RegexCompiler: new () => { compile(regex: string): string };\n` +
+    `  grammar_from(format: LLGuidanceGrammarFormat, text: string | unknown): string;\n` +
+    `  grammarFrom(format: LLGuidanceGrammarFormat, text: string | unknown): string;\n` +
+    `  regex_to_lark(regex: string): string;\n` +
+    `  get_version(): string;\n` +
     `  createTokenizer(config?: Record<string, unknown>): unknown;\n` +
-    `  createInterpreter(config: { tokenizer: unknown; response_format: LLGuidanceResponseFormat }): unknown;\n` +
+    `  createInterpreter(config: { tokenizer: unknown; response_format?: LLGuidanceResponseFormat; grammar?: string; grammarFormat?: LLGuidanceGrammarFormat }): unknown;\n` +
     `}\n\n` +
     `export type LLGuidanceWasmInput = string | URL | Request | Response | BufferSource | WebAssembly.Module;\n\n` +
     `export interface LLGuidanceWasmFactory {\n` +
@@ -62,7 +110,8 @@ await writeFile(
     `  wasmFactory?: LLGuidanceWasmFactory | Promise<LLGuidanceWasmFactory> | (() => LLGuidanceWasmFactory | Promise<LLGuidanceWasmFactory>);\n` +
     `  wasmFactoryUrl?: string | URL;\n` +
     `}\n\n` +
-    `export function loadBundledLLGuidance(options?: LoadBundledLLGuidanceOptions): Promise<LLGuidanceRuntime>;\n`,
+    `export function loadBundledLLGuidance(options?: LoadBundledLLGuidanceOptions): Promise<LLGuidanceRuntime>;\n` +
+    `export const loadLLGuidance: typeof loadBundledLLGuidance;\n`,
 );
 
 await writeFile(

@@ -7,6 +7,8 @@ export async function loadBundledLLGuidance(options = {}) {
   return createLLGuidanceRuntime(wasmFactory);
 }
 
+export const loadLLGuidance = loadBundledLLGuidance;
+
 async function loadWasmFactory(options) {
   if (options.wasmFactory) {
     return resolveWasmFactory(options.wasmFactory);

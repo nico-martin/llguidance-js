@@ -45,6 +45,24 @@ const tokenId = 0;
 const result = interpreter.commitToken(tokenId);
 ```
 
+## Python-Style API
+
+The loaded runtime also exposes class names and helpers modeled after the Python `llguidance` package:
+
+```js
+import { loadLLGuidance } from "llguidance";
+
+const llguidance = await loadLLGuidance();
+const tokenizer = new llguidance.LLTokenizer(modelTokenizer);
+const grammar = llguidance.LLMatcher.grammar_from_regex("[a-z]+");
+const matcher = new llguidance.LLMatcher(tokenizer, grammar);
+
+const bitmask = matcher.compute_bitmask();
+matcher.consume_token(tokenId);
+```
+
+See `api.local.md` in this repository for the current Python-to-JS API mapping.
+
 ### Browser Bundlers And WASM URLs
 
 The browser build uses a bundler-resolved WASM URL internally, so Vite/Rollup-style apps can usually call `loadBundledLLGuidance()` directly.

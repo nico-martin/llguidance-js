@@ -27,7 +27,10 @@ struct TokenizerConfig {
 
 #[derive(Deserialize)]
 struct InterpreterConfig {
-    response_format: ResponseFormat,
+    response_format: Option<ResponseFormat>,
+    grammar: Option<String>,
+    #[serde(alias = "grammarFormat")]
+    grammar_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +68,16 @@ impl LLGuidanceTokenizer {
 
         Ok(Self { tok_env })
     }
+
+    #[wasm_bindgen(js_name = vocabSize)]
+    pub fn vocab_size(&self) -> usize {
+        self.tok_env.tok_trie().vocab_size()
+    }
+
+    #[wasm_bindgen(js_name = eosToken)]
+    pub fn eos_token(&self) -> u32 {
+        self.tok_env.eos_token()
+    }
 }
 
 #[wasm_bindgen]
@@ -81,7 +94,7 @@ impl LLGuidanceInterpreter {
     ) -> Result<LLGuidanceInterpreter, JsValue> {
         let config: InterpreterConfig = serde_wasm_bindgen::from_value(config)
             .map_err(|err| js_error(format!("invalid interpreter config: {err}")))?;
-        let grammar = grammar_from_response_format(config.response_format);
+        let grammar = grammar_from_interpreter_config(config)?;
 
         let mut factory = ParserFactory::new_simple(&tokenizer.tok_env)
             .map_err(|err| js_error(format!("failed to create parser factory: {err}")))?;
@@ -147,6 +160,28 @@ impl LLGuidanceInterpreter {
     }
 }
 
+#[wasm_bindgen(js_name = grammarFrom)]
+pub fn grammar_from(format: &str, text: &str) -> Result<String, JsValue> {
+    grammar_from_format(format, text).and_then(stringify_grammar)
+}
+
+#[wasm_bindgen(js_name = grammarFromJsonSchema)]
+pub fn grammar_from_json_schema(schema: JsValue) -> Result<String, JsValue> {
+    let schema: Value = serde_wasm_bindgen::from_value(schema)
+        .map_err(|err| js_error(format!("invalid JSON schema: {err}")))?;
+    stringify_grammar(TopLevelGrammar::from_json_schema(schema))
+}
+
+#[wasm_bindgen(js_name = grammarFromLark)]
+pub fn grammar_from_lark(lark: &str) -> Result<String, JsValue> {
+    stringify_grammar(TopLevelGrammar::from_lark(lark.to_string()))
+}
+
+#[wasm_bindgen(js_name = grammarFromRegex)]
+pub fn grammar_from_regex(regex: &str) -> Result<String, JsValue> {
+    stringify_grammar(TopLevelGrammar::from_regex(regex))
+}
+
 fn build_token_env(
     tokens: Vec<Vec<u8>>,
     eos_token_id: Option<u32>,
@@ -180,12 +215,59 @@ fn build_token_env(
     Ok(ApproximateTokEnv::new(TokTrie::from(&info, &tokens)).into_env())
 }
 
+fn grammar_from_interpreter_config(config: InterpreterConfig) -> Result<TopLevelGrammar, JsValue> {
+    if let Some(grammar) = config.grammar {
+        return match config.grammar_format.as_deref() {
+            Some(format) => grammar_from_format(format, &grammar),
+            None => TopLevelGrammar::from_lark_or_grammar_list(&grammar)
+                .map_err(|err| js_error(format!("invalid grammar: {err}"))),
+        };
+    }
+
+    if let Some(format) = config.response_format {
+        return Ok(grammar_from_response_format(format));
+    }
+
+    Err(js_error("interpreter config requires grammar or response_format"))
+}
+
 fn grammar_from_response_format(format: ResponseFormat) -> TopLevelGrammar {
     match format {
         ResponseFormat::JsonObject => TopLevelGrammar::from_json_schema(json!({ "type": "object" })),
         ResponseFormat::JsonSchema { json_schema } => TopLevelGrammar::from_json_schema(json_schema),
         ResponseFormat::Regex { regex } => TopLevelGrammar::from_regex(&regex),
     }
+}
+
+fn grammar_from_format(format: &str, text: &str) -> Result<TopLevelGrammar, JsValue> {
+    match format {
+        "lark" => Ok(TopLevelGrammar::from_lark(text.to_string())),
+        "regex" => Ok(TopLevelGrammar::from_regex(text)),
+        "json" | "json_schema" => serde_json::from_str(text)
+            .map(TopLevelGrammar::from_json_schema)
+            .map_err(|err| js_error(format!("invalid JSON schema: {err}"))),
+        "json_object" => Ok(TopLevelGrammar::from_json_schema(json!({ "type": "object" }))),
+        "choice" => {
+            let choices: Vec<String> = serde_json::from_str(text)
+                .map_err(|err| js_error(format!("invalid choice list: {err}")))?;
+            let lark = format!(
+                "start: {}",
+                choices
+                    .into_iter()
+                    .map(|choice| serde_json::to_string(&choice).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+            Ok(TopLevelGrammar::from_lark(lark))
+        }
+        "llguidance" | "guidance" => TopLevelGrammar::from_lark_or_grammar_list(text)
+            .map_err(|err| js_error(format!("invalid llguidance grammar: {err}"))),
+        _ => Err(js_error(format!("unknown grammar format: {format}"))),
+    }
+}
+
+fn stringify_grammar(grammar: TopLevelGrammar) -> Result<String, JsValue> {
+    serde_json::to_string(&grammar).map_err(|err| js_error(format!("failed to serialize grammar: {err}")))
 }
 
 fn js_error(message: impl Into<String>) -> JsValue {
