@@ -55,12 +55,12 @@ Returned `Uint32Array` masks are cloned, so callers can mutate them without corr
 - `src/engine/regex-only.ts` and `src/engine/json-only.ts`: static single-engine wiring
 - `src/engine/regex.ts`: regex NFA
 - `src/engine/json-schema.ts`: JSON parser and schema validator
-- `src/runtime.js`: convenience runtime and Python-style compatibility wrappers
-- `src/lean-runtime.js`: low-level feature runtime without compatibility classes
-- `src/runtime-core.js`: shared tokenizer conversion, cache, and handle creation
-- `src/tokenizer_bridge.js`: extraction of raw token bytes from compatible tokenizer objects
-- `src/llguidance.js`: cached runtime loader
-- `src/regex.js` and `src/json-schema.js`: cached feature loaders
+- `src/runtime.ts`: convenience runtime and Python-style compatibility wrappers
+- `src/lean-runtime.ts`: low-level feature runtime without compatibility classes
+- `src/runtime-core.ts`: shared tokenizer conversion, cache, and handle creation
+- `src/tokenizer_bridge.ts`: extraction of raw token bytes from compatible tokenizer objects
+- `src/llguidance.ts`: cached runtime loader
+- `src/regex.ts` and `src/json-schema.ts`: cached feature loaders
 - `scripts/build-js.mjs`: full and feature browser and Node.js bundling
 
 ## Static Bundles

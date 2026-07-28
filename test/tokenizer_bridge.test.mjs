@@ -1,9 +1,9 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
+import test from "node:test";
+import assert from "node:assert/strict";
 
-import { extractLLGuidanceTokenizerConfig } from '../src/tokenizer_bridge.js';
+import { extractLLGuidanceTokenizerConfig } from "../src/tokenizer_bridge.ts";
 
-test('normalizes an explicit llguidance tokenizer config', () => {
+test("normalizes an explicit llguidance tokenizer config", () => {
   const tokens = [[123], [125]];
   const config = extractLLGuidanceTokenizerConfig({
     tokens,
@@ -18,13 +18,13 @@ test('normalizes an explicit llguidance tokenizer config', () => {
   assert.deepEqual(config.specialTokenIds, [0, 1]);
 });
 
-test('extracts UTF-8 token bytes from tokenizer JSON vocab', () => {
+test("extracts UTF-8 token bytes from tokenizer JSON vocab", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
       model: {
         vocab: {
           hello: 0,
-          'é': 1,
+          é: 1,
         },
       },
     },
@@ -38,7 +38,7 @@ test('extracts UTF-8 token bytes from tokenizer JSON vocab', () => {
   assert.equal(config.eosTokenId, 1);
 });
 
-test('parses tokenizer JSON returned as a string', () => {
+test("parses tokenizer JSON returned as a string", () => {
   const config = extractLLGuidanceTokenizerConfig({
     json() {
       return JSON.stringify({ model: { vocab: { a: 0 } } });
@@ -48,11 +48,11 @@ test('parses tokenizer JSON returned as a string', () => {
   assert.deepEqual(config.tokens, [[97]]);
 });
 
-test('decodes byte-level BPE token alphabet', () => {
+test("decodes byte-level BPE token alphabet", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      model: { vocab: { 'Ġword': 0, 'Â©': 1 } },
-      decoder: { type: 'ByteLevel' },
+      model: { vocab: { Ġword: 0, "Â©": 1 } },
+      decoder: { type: "ByteLevel" },
     },
   });
 
@@ -60,13 +60,13 @@ test('decodes byte-level BPE token alphabet', () => {
   assert.deepEqual(config.tokens[1], [194, 169]);
 });
 
-test('decodes SentencePiece whitespace marker', () => {
+test("decodes SentencePiece whitespace marker", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
       model: {
-        type: 'Unigram',
+        type: "Unigram",
         vocab: {
-          '▁hello': 0,
+          "▁hello": 0,
           world: 1,
         },
       },
@@ -77,12 +77,16 @@ test('decodes SentencePiece whitespace marker', () => {
   assert.deepEqual(config.tokens[1], [119, 111, 114, 108, 100]);
 });
 
-test('supports the real Unigram [token, score] vocabulary shape', () => {
+test("supports the real Unigram [token, score] vocabulary shape", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
       model: {
-        type: 'Unigram',
-        vocab: [['<unk>', 0], ['▁hello', -1.25], ['world', -2]],
+        type: "Unigram",
+        vocab: [
+          ["<unk>", 0],
+          ["▁hello", -1.25],
+          ["world", -2],
+        ],
       },
     },
     eos_token_id: 0,
@@ -95,21 +99,21 @@ test('supports the real Unigram [token, score] vocabulary shape', () => {
   ]);
 });
 
-test('decodes byte fallback tokens', () => {
+test("decodes byte fallback tokens", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      model: { vocab: { '<0x00>': 0, '<0xFF>': 1 } },
+      model: { vocab: { "<0x00>": 0, "<0xFF>": 1 } },
     },
   });
 
   assert.deepEqual(config.tokens, [[0], [255]]);
 });
 
-test('uses added token content and special token ids', () => {
+test("uses added token content and special token ids", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      model: { vocab: { a: 0, '<|end|>': 1 } },
-      added_tokens: [{ id: 1, content: '<|end|>', special: true }],
+      model: { vocab: { a: 0, "<|end|>": 1 } },
+      added_tokens: [{ id: 1, content: "<|end|>", special: true }],
     },
     eos_token_id: 1,
   });
@@ -118,11 +122,11 @@ test('uses added token content and special token ids', () => {
   assert.deepEqual(config.specialTokenIds, [1]);
 });
 
-test('fills sparse vocabulary ids with added tokens before validation', () => {
+test("fills sparse vocabulary ids with added tokens before validation", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
       model: { vocab: { a: 0, c: 2 } },
-      added_tokens: [{ id: 1, content: 'b', special: false }],
+      added_tokens: [{ id: 1, content: "b", special: false }],
     },
     eos_token_id: 2,
   });
@@ -131,13 +135,13 @@ test('fills sparse vocabulary ids with added tokens before validation', () => {
   assert.deepEqual(config.specialTokenIds, [2]);
 });
 
-test('does not classify nonspecial added tokens as special', () => {
+test("does not classify nonspecial added tokens as special", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      model: { vocab: { a: 0, '<new>': 1, '</s>': 2 } },
+      model: { vocab: { a: 0, "<new>": 1, "</s>": 2 } },
       added_tokens: [
-        { id: 1, content: '<new>', special: false },
-        { id: 2, content: '</s>', special: true },
+        { id: 1, content: "<new>", special: false },
+        { id: 2, content: "</s>", special: true },
       ],
     },
     eos_token_id: 2,
@@ -146,13 +150,13 @@ test('does not classify nonspecial added tokens as special', () => {
   assert.deepEqual(config.specialTokenIds, [2]);
 });
 
-test('finds ByteLevel in nested decoder sequences and arrays', () => {
+test("finds ByteLevel in nested decoder sequences and arrays", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      model: { vocab: { 'Ġword': 0, '</s>': 1 } },
+      model: { vocab: { Ġword: 0, "</s>": 1 } },
       decoder: {
-        type: 'Sequence',
-        decoders: [{ type: 'Replace' }, [{ type: 'ByteLevel' }]],
+        type: "Sequence",
+        decoders: [{ type: "Replace" }, [{ type: "ByteLevel" }]],
       },
     },
     eos_token_id: 1,
@@ -161,13 +165,13 @@ test('finds ByteLevel in nested decoder sequences and arrays', () => {
   assert.deepEqual(config.tokens[0], [32, 119, 111, 114, 100]);
 });
 
-test('removes the WordPiece continuing prefix from contribution bytes', () => {
+test("removes the WordPiece continuing prefix from contribution bytes", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
       model: {
-        type: 'WordPiece',
-        continuing_subword_prefix: '##',
-        vocab: { play: 0, '##ing': 1, '[SEP]': 2 },
+        type: "WordPiece",
+        continuing_subword_prefix: "##",
+        vocab: { play: 0, "##ing": 1, "[SEP]": 2 },
       },
     },
     eos_token_id: 2,
@@ -177,12 +181,12 @@ test('removes the WordPiece continuing prefix from contribution bytes', () => {
   assert.deepEqual(config.tokens[1], [105, 110, 103]);
 });
 
-test('supports Map vocabularies from getVocab()', () => {
+test("supports Map vocabularies from getVocab()", () => {
   const config = extractLLGuidanceTokenizerConfig({
     getVocab() {
       return new Map([
-        ['a', 0],
-        ['b', 1],
+        ["a", 0],
+        ["b", 1],
       ]);
     },
   });
@@ -190,8 +194,8 @@ test('supports Map vocabularies from getVocab()', () => {
   assert.deepEqual(config.tokens, [[97], [98]]);
 });
 
-test('supports idToToken plus vocab size APIs', () => {
-  const values = ['a', 'b'];
+test("supports idToToken plus vocab size APIs", () => {
+  const values = ["a", "b"];
   const config = extractLLGuidanceTokenizerConfig({
     getVocabSize() {
       return values.length;
@@ -204,21 +208,22 @@ test('supports idToToken plus vocab size APIs', () => {
   assert.deepEqual(config.tokens, [[97], [98]]);
 });
 
-test('supports callable Transformers.js tokenizer objects', () => {
+test("supports callable Transformers.js tokenizer objects", () => {
   function tokenizer() {}
   tokenizer._tokenizerJSON = {
     model: {
       vocab: {
-        'Ġhello': 0,
-        '</s>': 1,
+        Ġhello: 0,
+        "</s>": 1,
       },
     },
-    decoder: { type: 'ByteLevel' },
-    added_tokens: [{ id: 1, content: '</s>', special: true }],
+    decoder: { type: "ByteLevel" },
+    added_tokens: [{ id: 1, content: "</s>", special: true }],
   };
   tokenizer.get_vocab = () => tokenizer._tokenizerJSON.model.vocab;
-  tokenizer.decode = () => '';
-  tokenizer.token_to_id = (token) => tokenizer._tokenizerJSON.model.vocab[token];
+  tokenizer.decode = () => "";
+  tokenizer.token_to_id = (token) =>
+    tokenizer._tokenizerJSON.model.vocab[token];
   tokenizer.eos_token_id = 1;
   tokenizer.bos_token_id = 0;
   tokenizer.all_special_ids = [1];
@@ -232,12 +237,12 @@ test('supports callable Transformers.js tokenizer objects', () => {
   assert.deepEqual(config.specialTokenIds, [0, 1]);
 });
 
-test('resolves eos and bos ids from token strings', () => {
+test("resolves eos and bos ids from token strings", () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
-      eos_token: '</s>',
-      bos_token: '<s>',
-      model: { vocab: { '<s>': 0, '</s>': 1 } },
+      eos_token: "</s>",
+      bos_token: "<s>",
+      model: { vocab: { "<s>": 0, "</s>": 1 } },
     },
   });
 
@@ -245,23 +250,26 @@ test('resolves eos and bos ids from token strings', () => {
   assert.equal(config.eosTokenId, 1);
 });
 
-test('throws a useful error when no vocab can be extracted', () => {
+test("throws a useful error when no vocab can be extracted", () => {
   assert.throws(
     () => extractLLGuidanceTokenizerConfig({}),
     /Could not extract tokenizer vocabulary/,
   );
 });
 
-test('throws a useful error for invalid tokenizer values', () => {
+test("throws a useful error for invalid tokenizer values", () => {
   assert.throws(
     () => extractLLGuidanceTokenizerConfig(null),
     /object or callable tokenizer/,
   );
 });
 
-test('throws when vocabulary ids are sparse', () => {
+test("throws when vocabulary ids are sparse", () => {
   assert.throws(
-    () => extractLLGuidanceTokenizerConfig({ _tokenizerJSON: { model: { vocab: { a: 0, c: 2 } } } }),
+    () =>
+      extractLLGuidanceTokenizerConfig({
+        _tokenizerJSON: { model: { vocab: { a: 0, c: 2 } } },
+      }),
     /missing token id 1/,
   );
 });

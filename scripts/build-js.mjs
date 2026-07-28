@@ -10,9 +10,9 @@ const common = {
 };
 
 const entries = [
-  ["", "src/llguidance.js", "src/llguidance.node.js"],
-  ["regex.", "src/regex.js", "src/regex.js"],
-  ["json-schema.", "src/json-schema.js", "src/json-schema.js"],
+  ["", "src/llguidance.ts", "src/llguidance.node.ts"],
+  ["regex.", "src/regex.ts", "src/regex.ts"],
+  ["json-schema.", "src/json-schema.ts", "src/json-schema.ts"],
 ];
 const builds = entries.flatMap(([prefix, browserEntry, nodeEntry]) => [
   {

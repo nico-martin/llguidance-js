@@ -44,8 +44,8 @@ Browser bundle sizes measured with esbuild 0.25 on July 28, 2026:
 
 | Entry                    | Readable raw | Minified raw | Minified gzip |
 | ------------------------ | -----------: | -----------: | ------------: |
-| `llguidance`             |      120,614 |       65,223 |        18,912 |
-| `llguidance/regex`       |       46,926 |       25,498 |         8,206 |
-| `llguidance/json-schema` |       90,103 |       48,824 |        14,009 |
+| `llguidance`             |      121,940 |       65,674 |        19,158 |
+| `llguidance/regex`       |       48,192 |       25,796 |         8,362 |
+| `llguidance/json-schema` |       91,369 |       49,125 |        14,164 |
 
 Source maps are excluded from these values. Run `pnpm run build:dist` followed by `pnpm run size:js` to measure the current minified browser outputs.

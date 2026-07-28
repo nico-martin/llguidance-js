@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadLLGuidance } from "../src/llguidance.node.js";
+import { loadLLGuidance } from "../src/llguidance.node.ts";
 
 const llguidance = await loadLLGuidance();
 const encoder = new TextEncoder();

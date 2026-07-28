@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { loadJsonGuidance } from "../src/json-schema.js";
-import { loadRegexGuidance } from "../src/regex.js";
+import { loadJsonGuidance } from "../src/json-schema.ts";
+import { loadRegexGuidance } from "../src/regex.ts";
 
 const distPackageUrl = new URL("../dist/package.json", import.meta.url);
 const hasStagedFeatureExports =

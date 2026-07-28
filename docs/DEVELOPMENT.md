@@ -66,8 +66,8 @@ Benchmark results are non-contractual and depend on the host runtime. See [PERFO
 - `src/engine/regex-only.ts` and `src/engine/json-only.ts`: feature compiler wiring
 - `src/engine/regex.ts`: incremental regex NFA
 - `src/engine/json-schema.ts`: JSON prefix parser and schema validator
-- `src/runtime.js`: public runtime wrappers
-- `src/lean-runtime.js` and `src/runtime-core.js`: feature runtime and shared handles
-- `src/tokenizer_bridge.js`: tokenizer vocabulary extraction
+- `src/runtime.ts`: public runtime wrappers
+- `src/lean-runtime.ts` and `src/runtime-core.ts`: feature runtime and shared handles
+- `src/tokenizer_bridge.ts`: tokenizer vocabulary extraction
 - `scripts/build-js.mjs`: development bundles and watch mode
 - `scripts/build-dist.mjs`: staged package generation

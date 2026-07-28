@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   loadBundledLLGuidance,
   loadLLGuidance,
-} from "../src/llguidance.node.js";
+} from "../src/llguidance.node.ts";
 
 test("exports the public JS API", () => {
   assert.equal(typeof loadBundledLLGuidance, "function");
@@ -12,7 +12,7 @@ test("exports the public JS API", () => {
 });
 
 test("does not export internal runtime helper from node entry", async () => {
-  const entry = await import("../src/llguidance.node.js");
+  const entry = await import("../src/llguidance.node.ts");
   assert.equal("createLLGuidanceRuntime" in entry, false);
 });
 

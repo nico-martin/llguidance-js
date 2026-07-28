@@ -5,7 +5,7 @@ const LARK_UNSUPPORTED =
 const UPSTREAM_UNSUPPORTED =
   "Raw llguidance/guidance serialized grammars are not supported by the pure TypeScript core backend; use a marker produced by this backend";
 
-type TokenizerConfig = {
+export interface TokenizerConfig {
   tokens?: Array<Uint8Array | readonly number[]>;
   eosTokenId?: number;
   eos_token_id?: number;
@@ -13,7 +13,7 @@ type TokenizerConfig = {
   bos_token_id?: number;
   specialTokenIds?: readonly number[];
   special_token_ids?: readonly number[];
-};
+}
 
 type Marker = {
   [MARKER_KEY]: typeof MARKER_VERSION;
@@ -58,7 +58,41 @@ type TokenizerData = {
   readonly special: ReadonlySet<number>;
 };
 
-type MaskResult = { mask: Uint32Array; vocabSize: number } | { stop: true };
+export type MaskResult =
+  { mask: Uint32Array; vocabSize: number } | { stop: true };
+
+export interface CommitResult {
+  stop: boolean;
+  backtrack: number;
+  ffTokens: number[];
+}
+
+export interface TokenizerHandle {
+  vocabSize(): number;
+  eosToken(): number;
+  token(id: number): Uint8Array;
+  isSpecial(id: number): boolean;
+  free(): void;
+  dispose(): void;
+}
+
+export interface InterpreterHandle {
+  computeMask(): MaskResult;
+  commitToken(token: number): CommitResult;
+  free(): void;
+  dispose(): void;
+}
+
+export interface HandleEngineModule<
+  TTokenizer extends TokenizerHandle = TokenizerHandle,
+  TInterpreter extends InterpreterHandle = InterpreterHandle,
+> {
+  LLGuidanceTokenizer: new (config?: TokenizerConfig) => TTokenizer;
+  LLGuidanceInterpreter: new (
+    tokenizer: TTokenizer,
+    config: unknown,
+  ) => TInterpreter;
+}
 
 const tokenizerData = new WeakMap<LLGuidanceTokenizer, TokenizerData>();
 const singleBytes = Array.from({ length: 256 }, (_, byte) =>

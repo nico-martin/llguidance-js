@@ -43,7 +43,7 @@ Not ported because the JavaScript package does not expose the required API:
   Hugging Face tokenizer integration tests.
 - Rollback, deep copy, captures, parser warnings/options, canonical tokenizer
   slices, stop-controller internals, and fast-forward byte APIs, which are
-  currently absent or stubbed in `src/runtime.js`.
+  currently absent or stubbed in `src/runtime.ts`.
 - MaskBench and the official JSON Schema Test Suite checkout, which depend on
   separate external repositories and are integration/conformance jobs rather
   than self-contained upstream test vectors.
