@@ -20,7 +20,7 @@ so their vectors can be enabled as each subsystem is implemented.
 | `lark.test.mjs`               | Portable acceptance and compilation behavior from `parser/tests/test_lark.rs`             |
 | `matcher-api.test.mjs`        | Supported public API behavior from `python/torch_tests/test_matcher.py`                   |
 
-The full `pnpm test` run currently reports 453 tests: 415 passing and 38
+The full `pnpm test` run currently reports 457 tests: 419 passing and 38
 explicitly skipped. Lark tests and regex-valued JSON separators are skipped.
 Negative `multipleOf` values and URI format vectors run in TypeScript even
 though they remain skipped against the older `llguidance 1.2.0` backend.

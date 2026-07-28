@@ -21,6 +21,7 @@
     "build:dist": "node scripts/build-dist.mjs",
     "dev": "node scripts/build-js.mjs --watch",
     "bench:mask": "node scripts/benchmark-mask.mjs",
+    "size:js": "node scripts/report-bundle-sizes.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "publish": "node scripts/publish.mjs"

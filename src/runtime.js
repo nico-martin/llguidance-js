@@ -1,8 +1,12 @@
 import { extractLLGuidanceTokenizerConfig } from "./tokenizer_bridge.js";
+import {
+  createHandleRuntime,
+  normalizeTokenizerConfig,
+} from "./runtime-core.js";
 
 export function createLLGuidanceRuntime(mod) {
-  const llguidanceTokenizers = new WeakSet();
-  const externalTokenizerCache = new WeakMap();
+  const { createTokenizer, createInterpreter, resolveTokenizer } =
+    createHandleRuntime(mod);
 
   class LLTokenizer {
     constructor(tokenizer, options = {}) {
@@ -12,7 +16,6 @@ export function createLLGuidanceRuntime(mod) {
           : { ...extractLLGuidanceTokenizerConfig(tokenizer), ...options },
       );
       this._tokenizer = new mod.LLGuidanceTokenizer(config);
-      llguidanceTokenizers.add(this._tokenizer);
       this.vocab_size = this._tokenizer.vocabSize();
       this.eos_token = this._tokenizer.eosToken();
       this.eos_tokens = [this.eos_token];
@@ -304,47 +307,6 @@ export function createLLGuidanceRuntime(mod) {
     }
   }
 
-  const resolveTokenizer = (tokenizer) => {
-    if (tokenizer?._tokenizer) {
-      return tokenizer._tokenizer;
-    }
-    if (llguidanceTokenizers.has(tokenizer)) {
-      return tokenizer;
-    }
-    if (
-      tokenizer === null ||
-      (typeof tokenizer !== "object" && typeof tokenizer !== "function")
-    ) {
-      throw new TypeError("tokenizer must be an object or callable tokenizer");
-    }
-    let converted = externalTokenizerCache.get(tokenizer);
-    if (!converted) {
-      converted = createTokenizer(extractLLGuidanceTokenizerConfig(tokenizer));
-      externalTokenizerCache.set(tokenizer, converted);
-    }
-    return converted;
-  };
-
-  const createTokenizer = (config) => {
-    const tokenizer = new mod.LLGuidanceTokenizer(
-      normalizeTokenizerConfig(config),
-    );
-    llguidanceTokenizers.add(tokenizer);
-    return tokenizer;
-  };
-
-  const createInterpreter = (config) => {
-    const { tokenizer, ...interpreterConfig } = config ?? {};
-    if (!tokenizer) {
-      throw new TypeError("createInterpreter requires a tokenizer");
-    }
-
-    return new mod.LLGuidanceInterpreter(
-      resolveTokenizer(tokenizer),
-      interpreterConfig,
-    );
-  };
-
   return {
     LLTokenizer,
     LLInterpreter,
@@ -372,15 +334,6 @@ export function createLLGuidanceRuntime(mod) {
     },
     createTokenizer,
     createInterpreter,
-  };
-}
-
-function normalizeTokenizerConfig(config = {}) {
-  return {
-    ...config,
-    eosTokenId: config.eosTokenId ?? config.eos_token_id,
-    bosTokenId: config.bosTokenId ?? config.bos_token_id,
-    specialTokenIds: config.specialTokenIds ?? config.special_token_ids,
   };
 }
 

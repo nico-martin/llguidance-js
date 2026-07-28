@@ -35,3 +35,17 @@ pnpm run bench:mask
 The benchmark verifies mask correctness and operation-count reduction. Printed wall-clock timings are non-contractual and should only be compared on the same machine and runtime.
 
 For meaningful application benchmarks, use the actual model tokenizer and representative constraints. Include cold first-mask time, masks after commits, repeated cached masks, and memory retained by the tokenizer trie.
+
+## Bundle Size
+
+The full entry statically includes both engines and the compatibility runtime. `llguidance/regex` and `llguidance/json-schema` are static single-engine bundles; they do not defer code through dynamic imports.
+
+Browser bundle sizes measured with esbuild 0.25 on July 28, 2026:
+
+| Entry                    | Readable raw | Minified raw | Minified gzip |
+| ------------------------ | -----------: | -----------: | ------------: |
+| `llguidance`             |      120,614 |       65,223 |        18,912 |
+| `llguidance/regex`       |       46,926 |       25,498 |         8,206 |
+| `llguidance/json-schema` |       90,103 |       48,824 |        14,009 |
+
+Source maps are excluded from these values. Run `pnpm run build:dist` followed by `pnpm run size:js` to measure the current minified browser outputs.

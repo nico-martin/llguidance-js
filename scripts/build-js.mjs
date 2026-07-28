@@ -6,22 +6,28 @@ const common = {
   sourcemap: true,
   target: "es2022",
   logLevel: "info",
+  minify: process.argv.includes("--minify"),
 };
 
-const builds = [
+const entries = [
+  ["", "src/llguidance.js", "src/llguidance.node.js"],
+  ["regex.", "src/regex.js", "src/regex.js"],
+  ["json-schema.", "src/json-schema.js", "src/json-schema.js"],
+];
+const builds = entries.flatMap(([prefix, browserEntry, nodeEntry]) => [
   {
     ...common,
-    entryPoints: ["src/llguidance.js"],
-    outfile: "dist/browser.js",
+    entryPoints: [browserEntry],
+    outfile: `dist/${prefix}browser.js`,
     platform: "browser",
   },
   {
     ...common,
-    entryPoints: ["src/llguidance.node.js"],
-    outfile: "dist/node.js",
+    entryPoints: [nodeEntry],
+    outfile: `dist/${prefix}node.js`,
     platform: "node",
   },
-];
+]);
 
 if (process.argv.includes("--watch")) {
   const contexts = await Promise.all(

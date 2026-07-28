@@ -8,7 +8,7 @@ pnpm install
 
 ## Watch Mode
 
-Build the browser and Node.js bundles, then rebuild when imported source files change:
+Build all full and feature browser/Node.js bundles, then rebuild when imported source files change:
 
 ```bash
 pnpm dev
@@ -22,7 +22,11 @@ Build only the JavaScript bundles and source maps:
 pnpm run build:js
 ```
 
-This writes `dist/browser.js`, `dist/node.js`, and their source maps.
+This writes readable full, `regex`, and `json-schema` browser/Node.js bundles and source maps. Pass `--minify` directly to the build script for minified output:
+
+```bash
+pnpm run build:js -- --minify
+```
 
 Build the complete staged package:
 
@@ -30,7 +34,13 @@ Build the complete staged package:
 pnpm run build:dist
 ```
 
-`build:dist` recreates `dist/`, runs `build:js`, generates `llguidance.d.ts` and the publishable `package.json`, and copies the README.
+`build:dist` recreates `dist/`, builds minified bundles with source maps, generates root and feature declarations plus the publishable subpath exports, and copies public documentation.
+
+Report current browser bundle raw and gzip sizes with:
+
+```bash
+pnpm run size:js
+```
 
 ## Verification
 
@@ -51,10 +61,13 @@ Benchmark results are non-contractual and depend on the host runtime. See [PERFO
 
 ## Main Files
 
-- `src/engine/index.ts`: tokenizer trie and interpreter masking
+- `src/engine/core.ts`: compiler-injected tokenizer trie and interpreter masking
+- `src/engine/index.ts`: full compiler wiring
+- `src/engine/regex-only.ts` and `src/engine/json-only.ts`: feature compiler wiring
 - `src/engine/regex.ts`: incremental regex NFA
 - `src/engine/json-schema.ts`: JSON prefix parser and schema validator
 - `src/runtime.js`: public runtime wrappers
+- `src/lean-runtime.js` and `src/runtime-core.js`: feature runtime and shared handles
 - `src/tokenizer_bridge.js`: tokenizer vocabulary extraction
 - `scripts/build-js.mjs`: development bundles and watch mode
 - `scripts/build-dist.mjs`: staged package generation

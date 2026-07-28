@@ -42,6 +42,24 @@ if ("mask" in result) {
 
 Each interpreter represents one mutable generation stream. Use separate interpreters for batch rows, beams, or forks.
 
+## Feature Bundles
+
+The root entry includes both regex and JSON Schema engines plus the Python-style compatibility API. Applications that need only one constraint family can use a static feature subpath:
+
+```js
+import { loadRegexGuidance } from "llguidance/regex";
+
+const runtime = await loadRegexGuidance();
+```
+
+```js
+import { loadJsonGuidance } from "llguidance/json-schema";
+
+const runtime = await loadJsonGuidance();
+```
+
+The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`. These are independent static bundles with no dynamic imports, so the excluded engine is not downloaded or parsed.
+
 ## Response Formats
 
 ```js
@@ -78,6 +96,7 @@ An EOS token ID is required for custom token arrays. See [TOKENIZERS.md](docs/TO
 ## API
 
 - `loadBundledLLGuidance()` returns the cached runtime.
+- `loadRegexGuidance()` and `loadJsonGuidance()` return cached lean feature runtimes.
 - `runtime.createTokenizer(config)` creates a tokenizer handle.
 - `runtime.createInterpreter(config)` creates one constrained-decoding stream.
 - `interpreter.computeMask()` returns `{ mask, vocabSize }` or `{ stop: true }`.

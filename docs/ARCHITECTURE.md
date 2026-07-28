@@ -50,11 +50,22 @@ Returned `Uint32Array` masks are cloned, so callers can mutate them without corr
 
 ## Runtime Layers
 
-- `src/engine/`: tokenizer, trie, regex NFA, JSON parser, and schema validator
+- `src/engine/core.ts`: compiler-injected tokenizer, trie, interpreter, and marker factory
+- `src/engine/index.ts`: full engine wiring with both compilers
+- `src/engine/regex-only.ts` and `src/engine/json-only.ts`: static single-engine wiring
+- `src/engine/regex.ts`: regex NFA
+- `src/engine/json-schema.ts`: JSON parser and schema validator
 - `src/runtime.js`: convenience runtime and Python-style compatibility wrappers
+- `src/lean-runtime.js`: low-level feature runtime without compatibility classes
+- `src/runtime-core.js`: shared tokenizer conversion, cache, and handle creation
 - `src/tokenizer_bridge.js`: extraction of raw token bytes from compatible tokenizer objects
 - `src/llguidance.js`: cached runtime loader
-- `scripts/build-js.mjs`: browser and Node.js bundling
+- `src/regex.js` and `src/json-schema.js`: cached feature loaders
+- `scripts/build-js.mjs`: full and feature browser and Node.js bundling
+
+## Static Bundles
+
+The root entry injects both compilers into the engine factory. The `llguidance/regex` and `llguidance/json-schema` entries inject one compiler each and therefore have no static dependency on the excluded implementation. They do not use dynamic imports. Constructing an interpreter for an excluded response format throws a feature-unavailable error.
 
 ## Lifecycle
 

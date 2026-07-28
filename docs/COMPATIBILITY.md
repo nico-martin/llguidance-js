@@ -20,6 +20,14 @@ The primary JavaScript API is:
 
 Python-style class names and helpers are available where they map cleanly to the TypeScript engines. See [API_MAPPING.md](API_MAPPING.md) for method-level details.
 
+## Feature Entries
+
+`llguidance/regex` exports `loadRegexGuidance()` and supports only the `regex` response format. `llguidance/json-schema` exports `loadJsonGuidance()` and supports `json_object` and `json_schema`.
+
+Both return a lean runtime containing `createTokenizer()`, `createInterpreter()`, and `get_version()`. They intentionally omit `LLMatcher`, `LLInterpreter`, and compiler compatibility classes. The full `llguidance` entry retains those APIs and includes both engines.
+
+Feature selection is static: no entry uses a dynamic import, and requesting an unavailable format from a specialized runtime fails explicitly.
+
 ## Unsupported Upstream Features
 
 - Lark parsing and general context-free grammar execution
@@ -44,4 +52,4 @@ An interpreter represents one mutable stream. Batch rows, beams, and forks requi
 
 ## Error Policy
 
-Unsupported grammar formats and schema assertion keywords fail explicitly. Compatibility stubs are documented in [API_MAPPING.md](API_MAPPING.md) and should not be interpreted as implemented upstream behavior.
+Unsupported grammar formats, unavailable feature-bundle engines, and schema assertion keywords fail explicitly. Compatibility stubs are documented in [API_MAPPING.md](API_MAPPING.md) and should not be interpreted as implemented upstream behavior.

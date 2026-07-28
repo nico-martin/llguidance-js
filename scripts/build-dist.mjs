@@ -33,7 +33,7 @@ const sourcePackage = JSON.parse(await readFile(sourcePackagePath, "utf8"));
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
 
-run("pnpm", ["run", "build:js"]);
+run("pnpm", ["run", "build:js", "--", "--minify"]);
 
 await writeFile(
   new URL("llguidance.d.ts", distDir),
@@ -168,6 +168,68 @@ export const loadLLGuidance: typeof loadBundledLLGuidance;
 `,
 );
 
+const featureTypeHeader = `import type {
+  JSONSchema,
+  LLGuidanceCommitResult,
+  LLGuidanceInterpreterHandle,
+  LLGuidanceMaskResult,
+  LLGuidanceTokenizerConfig,
+  LLGuidanceTokenizerHandle,
+  LLGuidanceTokenizerSource,
+} from "./llguidance.js";
+
+export type {
+  JSONSchema,
+  LLGuidanceCommitResult,
+  LLGuidanceInterpreterHandle,
+  LLGuidanceMaskResult,
+  LLGuidanceTokenizerConfig,
+  LLGuidanceTokenizerHandle,
+  LLGuidanceTokenizerSource,
+};
+
+`;
+
+const featureRuntimeType = (
+  formatType,
+  loaderName,
+) => `${featureTypeHeader}export type FeatureResponseFormat = ${formatType};
+
+export type FeatureInterpreterConfig =
+  | {
+      tokenizer: LLGuidanceTokenizerSource;
+      response_format: FeatureResponseFormat;
+      responseFormat?: never;
+    }
+  | {
+      tokenizer: LLGuidanceTokenizerSource;
+      response_format?: never;
+      responseFormat: FeatureResponseFormat;
+    };
+
+export interface FeatureGuidanceRuntime {
+  createTokenizer(config?: LLGuidanceTokenizerConfig): LLGuidanceTokenizerHandle;
+  createInterpreter(config: FeatureInterpreterConfig): LLGuidanceInterpreterHandle;
+  get_version(): string;
+}
+
+export function ${loaderName}(): Promise<FeatureGuidanceRuntime>;
+`;
+
+await Promise.all([
+  writeFile(
+    new URL("regex.d.ts", distDir),
+    featureRuntimeType('{ type: "regex"; regex: string }', "loadRegexGuidance"),
+  ),
+  writeFile(
+    new URL("json-schema.d.ts", distDir),
+    featureRuntimeType(
+      '{ type: "json_object" } | { type: "json_schema"; json_schema: JSONSchema }',
+      "loadJsonGuidance",
+    ),
+  ),
+]);
+
 await writeFile(
   new URL("package.json", distDir),
   `${JSON.stringify(
@@ -188,6 +250,16 @@ await writeFile(
         "node.js",
         "node.js.map",
         "llguidance.d.ts",
+        "regex.browser.js",
+        "regex.browser.js.map",
+        "regex.node.js",
+        "regex.node.js.map",
+        "regex.d.ts",
+        "json-schema.browser.js",
+        "json-schema.browser.js.map",
+        "json-schema.node.js",
+        "json-schema.node.js.map",
+        "json-schema.d.ts",
         "docs",
       ],
       exports: {
@@ -197,6 +269,20 @@ await writeFile(
           node: "./node.js",
           import: "./browser.js",
           default: "./browser.js",
+        },
+        "./regex": {
+          types: "./regex.d.ts",
+          browser: "./regex.browser.js",
+          node: "./regex.node.js",
+          import: "./regex.browser.js",
+          default: "./regex.browser.js",
+        },
+        "./json-schema": {
+          types: "./json-schema.d.ts",
+          browser: "./json-schema.browser.js",
+          node: "./json-schema.node.js",
+          import: "./json-schema.browser.js",
+          default: "./json-schema.browser.js",
         },
       },
       sideEffects: false,
