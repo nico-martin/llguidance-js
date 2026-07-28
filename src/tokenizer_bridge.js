@@ -16,8 +16,9 @@ export function extractLLGuidanceTokenizerConfig(tokenizer) {
   }
 
   const tokens = tokensFromVocab(vocab, tokenizerJSON);
-  const addedTokenIds = applyAddedTokens(tokens, tokenizerJSON);
-  const specialTokenIds = getSpecialTokenIds(tokenizer, tokenizerJSON, addedTokenIds);
+  applyAddedTokens(tokens, tokenizerJSON);
+  validateDenseTokens(tokens);
+  const specialTokenIds = getSpecialTokenIds(tokenizer, tokenizerJSON);
 
   return {
     tokens,
@@ -64,6 +65,9 @@ function getVocab(tokenizer, tokenizerJSON) {
 }
 
 function vocabToObject(vocab) {
+  if (Array.isArray(vocab)) {
+    return Object.fromEntries(vocab.map((entry, id) => [entry[0], id]));
+  }
   return vocab instanceof Map ? Object.fromEntries(vocab) : vocab;
 }
 
@@ -84,27 +88,26 @@ function tokensFromVocab(vocab, tokenizerJSON) {
     tokens[Number(id)] = tokenToBytes(token, tokenizerJSON);
   }
 
+  return tokens;
+}
+
+function applyAddedTokens(tokens, tokenizerJSON) {
+  for (const token of tokenizerJSON?.added_tokens ?? []) {
+    if (!Number.isInteger(token.id)) continue;
+    tokens[token.id] = utf8Bytes(token.content ?? '');
+  }
+}
+
+function validateDenseTokens(tokens) {
   for (let id = 0; id < tokens.length; ++id) {
     if (!tokens[id]) {
       throw new Error(`Tokenizer vocabulary is missing token id ${id}`);
     }
   }
-
-  return tokens;
 }
 
-function applyAddedTokens(tokens, tokenizerJSON) {
-  const addedTokenIds = [];
-  for (const token of tokenizerJSON?.added_tokens ?? []) {
-    if (!Number.isInteger(token.id)) continue;
-    tokens[token.id] = utf8Bytes(token.content ?? '');
-    addedTokenIds.push(token.id);
-  }
-  return addedTokenIds;
-}
-
-function getSpecialTokenIds(tokenizer, tokenizerJSON, addedTokenIds) {
-  const ids = new Set(addedTokenIds);
+function getSpecialTokenIds(tokenizer, tokenizerJSON) {
+  const ids = new Set();
 
   for (const token of tokenizerJSON?.added_tokens ?? []) {
     if (token.special && Number.isInteger(token.id)) ids.add(token.id);
@@ -160,6 +163,11 @@ function tokenToBytes(token, tokenizerJSON) {
     return utf8Bytes(token.replaceAll('▁', ' '));
   }
 
+  const continuingPrefix = tokenizerJSON?.model?.continuing_subword_prefix;
+  if (typeof continuingPrefix === 'string' && token.startsWith(continuingPrefix)) {
+    return utf8Bytes(token.slice(continuingPrefix.length));
+  }
+
   return utf8Bytes(token);
 }
 
@@ -174,8 +182,12 @@ function usesSentencePiece(tokenizerJSON) {
 
 function hasComponentType(component, type) {
   if (!component) return false;
+  if (Array.isArray(component)) {
+    return component.some((item) => hasComponentType(item, type));
+  }
+  if (typeof component !== 'object') return false;
   if (component.type === type) return true;
-  return Array.isArray(component.pre_tokenizers) && component.pre_tokenizers.some((item) => hasComponentType(item, type));
+  return Object.values(component).some((item) => hasComponentType(item, type));
 }
 
 function byteLevelTokenToBytes(token) {

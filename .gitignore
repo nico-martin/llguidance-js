@@ -28,10 +28,5 @@ coverage/
 .turbo/
 .cache/
 
-# Rust build output
-target/
-**/target/
-
-# wasm-pack generated files
-src/wasm/*
-!src/wasm/.gitkeep
+# Local upstream reference checkout
+llguidance-original/

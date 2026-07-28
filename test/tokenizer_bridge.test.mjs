@@ -77,6 +77,24 @@ test('decodes SentencePiece whitespace marker', () => {
   assert.deepEqual(config.tokens[1], [119, 111, 114, 108, 100]);
 });
 
+test('supports the real Unigram [token, score] vocabulary shape', () => {
+  const config = extractLLGuidanceTokenizerConfig({
+    _tokenizerJSON: {
+      model: {
+        type: 'Unigram',
+        vocab: [['<unk>', 0], ['▁hello', -1.25], ['world', -2]],
+      },
+    },
+    eos_token_id: 0,
+  });
+
+  assert.deepEqual(config.tokens, [
+    [60, 117, 110, 107, 62],
+    [32, 104, 101, 108, 108, 111],
+    [119, 111, 114, 108, 100],
+  ]);
+});
+
 test('decodes byte fallback tokens', () => {
   const config = extractLLGuidanceTokenizerConfig({
     _tokenizerJSON: {
@@ -98,6 +116,65 @@ test('uses added token content and special token ids', () => {
 
   assert.deepEqual(config.tokens[1], [60, 124, 101, 110, 100, 124, 62]);
   assert.deepEqual(config.specialTokenIds, [1]);
+});
+
+test('fills sparse vocabulary ids with added tokens before validation', () => {
+  const config = extractLLGuidanceTokenizerConfig({
+    _tokenizerJSON: {
+      model: { vocab: { a: 0, c: 2 } },
+      added_tokens: [{ id: 1, content: 'b', special: false }],
+    },
+    eos_token_id: 2,
+  });
+
+  assert.deepEqual(config.tokens, [[97], [98], [99]]);
+  assert.deepEqual(config.specialTokenIds, [2]);
+});
+
+test('does not classify nonspecial added tokens as special', () => {
+  const config = extractLLGuidanceTokenizerConfig({
+    _tokenizerJSON: {
+      model: { vocab: { a: 0, '<new>': 1, '</s>': 2 } },
+      added_tokens: [
+        { id: 1, content: '<new>', special: false },
+        { id: 2, content: '</s>', special: true },
+      ],
+    },
+    eos_token_id: 2,
+  });
+
+  assert.deepEqual(config.specialTokenIds, [2]);
+});
+
+test('finds ByteLevel in nested decoder sequences and arrays', () => {
+  const config = extractLLGuidanceTokenizerConfig({
+    _tokenizerJSON: {
+      model: { vocab: { 'Ġword': 0, '</s>': 1 } },
+      decoder: {
+        type: 'Sequence',
+        decoders: [{ type: 'Replace' }, [{ type: 'ByteLevel' }]],
+      },
+    },
+    eos_token_id: 1,
+  });
+
+  assert.deepEqual(config.tokens[0], [32, 119, 111, 114, 100]);
+});
+
+test('removes the WordPiece continuing prefix from contribution bytes', () => {
+  const config = extractLLGuidanceTokenizerConfig({
+    _tokenizerJSON: {
+      model: {
+        type: 'WordPiece',
+        continuing_subword_prefix: '##',
+        vocab: { play: 0, '##ing': 1, '[SEP]': 2 },
+      },
+    },
+    eos_token_id: 2,
+  });
+
+  assert.deepEqual(config.tokens[0], [112, 108, 97, 121]);
+  assert.deepEqual(config.tokens[1], [105, 110, 103]);
 });
 
 test('supports Map vocabularies from getVocab()', () => {

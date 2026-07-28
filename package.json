@@ -1,13 +1,13 @@
 {
   "name": "llguidance",
   "version": "0.1.7",
-  "description": "Browser and Node.js WASM bindings for llguidance constrained decoding.",
+  "description": "Browser and Node.js TypeScript implementation of llguidance constrained decoding.",
   "private": true,
   "type": "module",
   "license": "MIT",
   "keywords": [
     "llguidance",
-    "wasm",
+    "typescript",
     "grammar",
     "json-schema",
     "constrained-decoding"
@@ -17,15 +17,17 @@
     "registry": "https://registry.npmjs.org"
   },
   "scripts": {
-    "build:llguidance-wasm": "node scripts/build-llguidance-wasm.mjs --release",
-    "build:llguidance-wasm:dev": "node scripts/build-llguidance-wasm.mjs --dev",
     "build:js": "node scripts/build-js.mjs",
     "build:dist": "node scripts/build-dist.mjs",
+    "dev": "node scripts/build-js.mjs --watch",
+    "bench:mask": "node scripts/benchmark-mask.mjs",
+    "typecheck": "tsc --noEmit",
     "test": "node --test",
     "publish": "node scripts/publish.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

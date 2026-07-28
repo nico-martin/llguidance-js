@@ -1,7 +1,8 @@
-import { extractLLGuidanceTokenizerConfig } from './tokenizer_bridge.js';
+import { extractLLGuidanceTokenizerConfig } from "./tokenizer_bridge.js";
 
 export function createLLGuidanceRuntime(mod) {
   const llguidanceTokenizers = new WeakSet();
+  const externalTokenizerCache = new WeakMap();
 
   class LLTokenizer {
     constructor(tokenizer, options = {}) {
@@ -17,6 +18,14 @@ export function createLLGuidanceRuntime(mod) {
       this.eos_tokens = [this.eos_token];
       this.is_canonical = false;
     }
+
+    free() {
+      this._tokenizer.free();
+    }
+
+    dispose() {
+      this.free();
+    }
   }
 
   class LLInterpreter {
@@ -28,7 +37,7 @@ export function createLLGuidanceRuntime(mod) {
       );
       this._stopped = false;
       this._accepting = false;
-      this._stopReason = 'NotStopped';
+      this._stopReason = "NotStopped";
     }
 
     compute_mask() {
@@ -36,9 +45,12 @@ export function createLLGuidanceRuntime(mod) {
       this._stopped = Boolean(result.stop);
       this._accepting = this._stopped;
       if (this._stopped) {
-        this._stopReason = 'NoExtension';
+        this._stopReason = "NoExtension";
       }
-      return [result.mask ? bitsetToBytes(result.mask) : null, JSON.stringify(result)];
+      return [
+        result.mask ? bitsetToBytes(result.mask) : null,
+        JSON.stringify(result),
+      ];
     }
 
     compute_mask_into(target) {
@@ -56,7 +68,7 @@ export function createLLGuidanceRuntime(mod) {
       const result = this._interpreter.commitToken(sampledToken);
       this._stopped = Boolean(result.stop);
       if (this._stopped) {
-        this._stopReason = 'NoExtension';
+        this._stopReason = "NoExtension";
       }
       return [result.backtrack ?? 0, result.ffTokens ?? []];
     }
@@ -80,6 +92,14 @@ export function createLLGuidanceRuntime(mod) {
     commitToken(sampledToken) {
       return this._interpreter.commitToken(sampledToken);
     }
+
+    free() {
+      this._interpreter.free();
+    }
+
+    dispose() {
+      this.free();
+    }
   }
 
   class LLMatcher {
@@ -91,14 +111,16 @@ export function createLLGuidanceRuntime(mod) {
         this._tokenizer,
         normalizeInterpreterConfig(grammar, options),
       );
-      this._error = '';
+      this._error = "";
       this._stopped = false;
       this._accepting = false;
-      this._stopReason = 'NotStopped';
+      this._stopReason = "NotStopped";
     }
 
     static grammar_from_json_schema(schema) {
-      return mod.grammarFromJsonSchema(typeof schema === 'string' ? JSON.parse(schema) : schema);
+      return mod.grammarFromJsonSchema(
+        typeof schema === "string" ? JSON.parse(schema) : schema,
+      );
     }
 
     static grammar_from_lark(lark) {
@@ -111,13 +133,16 @@ export function createLLGuidanceRuntime(mod) {
 
     static validate_grammar(grammar, tokenizer = null) {
       if (!tokenizer) {
-        return '';
+        return "";
       }
+      let matcher;
       try {
-        new LLMatcher(tokenizer, grammar);
-        return '';
+        matcher = new LLMatcher(tokenizer, grammar);
+        return "";
       } catch (error) {
         return error?.message ?? String(error);
+      } finally {
+        matcher?.free();
       }
     }
 
@@ -134,7 +159,10 @@ export function createLLGuidanceRuntime(mod) {
     }
 
     compute_logit_bias() {
-      return bitmaskToLogitBias(this.compute_bitmask(), this._tokenizer.vocabSize());
+      return bitmaskToLogitBias(
+        this.compute_bitmask(),
+        this._tokenizer.vocabSize(),
+      );
     }
 
     consume_token(sampledToken) {
@@ -164,12 +192,20 @@ export function createLLGuidanceRuntime(mod) {
     }
 
     validate_tokens(tokens) {
-      const matcher = new LLMatcher({ _tokenizer: this._tokenizer }, this._grammar, this._options);
-      return matcher.try_consume_tokens(tokens);
+      const matcher = new LLMatcher(
+        { _tokenizer: this._tokenizer },
+        this._grammar,
+        this._options,
+      );
+      try {
+        return matcher.try_consume_tokens(tokens);
+      } finally {
+        matcher.free();
+      }
     }
 
     is_error() {
-      return this._error !== '';
+      return this._error !== "";
     }
 
     get_error() {
@@ -202,23 +238,37 @@ export function createLLGuidanceRuntime(mod) {
     }
 
     reset() {
-      this._interpreter = new mod.LLGuidanceInterpreter(
+      const replacement = new mod.LLGuidanceInterpreter(
         this._tokenizer,
         normalizeInterpreterConfig(this._grammar, this._options),
       );
-      this._error = '';
+      this._interpreter.free();
+      this._interpreter = replacement;
+      this._error = "";
       this._stopped = false;
       this._accepting = false;
-      this._stopReason = 'NotStopped';
+      this._stopReason = "NotStopped";
       return true;
     }
 
+    free() {
+      this._interpreter.free();
+    }
+
+    dispose() {
+      this.free();
+    }
+
     rollback() {
-      throw new Error('LLMatcher.rollback() is not implemented in the WASM binding yet');
+      throw new Error(
+        "LLMatcher.rollback() is not implemented in the TypeScript core backend yet",
+      );
     }
 
     deep_copy() {
-      throw new Error('LLMatcher.deep_copy() is not implemented in the WASM binding yet');
+      throw new Error(
+        "LLMatcher.deep_copy() is not implemented in the TypeScript core backend yet",
+      );
     }
 
     get_capture() {
@@ -236,7 +286,9 @@ export function createLLGuidanceRuntime(mod) {
     }
 
     compile(schema) {
-      return LLMatcher.grammar_from_json_schema(typeof schema === 'string' ? JSON.parse(schema) : schema);
+      return LLMatcher.grammar_from_json_schema(
+        typeof schema === "string" ? JSON.parse(schema) : schema,
+      );
     }
   }
 
@@ -259,11 +311,24 @@ export function createLLGuidanceRuntime(mod) {
     if (llguidanceTokenizers.has(tokenizer)) {
       return tokenizer;
     }
-    return createTokenizer(extractLLGuidanceTokenizerConfig(tokenizer));
+    if (
+      tokenizer === null ||
+      (typeof tokenizer !== "object" && typeof tokenizer !== "function")
+    ) {
+      throw new TypeError("tokenizer must be an object or callable tokenizer");
+    }
+    let converted = externalTokenizerCache.get(tokenizer);
+    if (!converted) {
+      converted = createTokenizer(extractLLGuidanceTokenizerConfig(tokenizer));
+      externalTokenizerCache.set(tokenizer, converted);
+    }
+    return converted;
   };
 
   const createTokenizer = (config) => {
-    const tokenizer = new mod.LLGuidanceTokenizer(normalizeTokenizerConfig(config));
+    const tokenizer = new mod.LLGuidanceTokenizer(
+      normalizeTokenizerConfig(config),
+    );
     llguidanceTokenizers.add(tokenizer);
     return tokenizer;
   };
@@ -271,10 +336,13 @@ export function createLLGuidanceRuntime(mod) {
   const createInterpreter = (config) => {
     const { tokenizer, ...interpreterConfig } = config ?? {};
     if (!tokenizer) {
-      throw new TypeError('createInterpreter requires a tokenizer');
+      throw new TypeError("createInterpreter requires a tokenizer");
     }
 
-    return new mod.LLGuidanceInterpreter(resolveTokenizer(tokenizer), interpreterConfig);
+    return new mod.LLGuidanceInterpreter(
+      resolveTokenizer(tokenizer),
+      interpreterConfig,
+    );
   };
 
   return {
@@ -285,16 +353,22 @@ export function createLLGuidanceRuntime(mod) {
     LarkCompiler,
     RegexCompiler,
     grammar_from(format, text) {
-      return mod.grammarFrom(format, typeof text === 'string' ? text : JSON.stringify(text));
+      return mod.grammarFrom(
+        format,
+        typeof text === "string" ? text : JSON.stringify(text),
+      );
     },
     grammarFrom(format, text) {
-      return mod.grammarFrom(format, typeof text === 'string' ? text : JSON.stringify(text));
+      return mod.grammarFrom(
+        format,
+        typeof text === "string" ? text : JSON.stringify(text),
+      );
     },
     regex_to_lark(regex) {
-      return String(regex).replaceAll('/', '\\/');
+      return String(regex).replaceAll("/", "\\/");
     },
     get_version() {
-      return 'llguidance-wasm';
+      return "llguidance-ts-core";
     },
     createTokenizer,
     createInterpreter,
@@ -311,14 +385,15 @@ function normalizeTokenizerConfig(config = {}) {
 }
 
 function normalizeInterpreterConfig(grammarOrConfig, options = {}) {
-  if (typeof grammarOrConfig === 'string') {
+  if (typeof grammarOrConfig === "string") {
     return { ...options, grammar: grammarOrConfig };
   }
 
   if (grammarOrConfig?.response_format || grammarOrConfig?.responseFormat) {
     return {
       ...grammarOrConfig,
-      response_format: grammarOrConfig.response_format ?? grammarOrConfig.responseFormat,
+      response_format:
+        grammarOrConfig.response_format ?? grammarOrConfig.responseFormat,
     };
   }
 
@@ -326,13 +401,21 @@ function normalizeInterpreterConfig(grammarOrConfig, options = {}) {
 }
 
 function isPlainTokenizerConfig(value) {
-  return value == null
-    || (typeof value === 'object' && value.constructor === Object && Object.keys(value).length === 0)
-    || Boolean(value.tokens || value.eos_token_id != null || value.eosTokenId != null);
+  return (
+    value == null ||
+    (typeof value === "object" &&
+      value.constructor === Object &&
+      Object.keys(value).length === 0) ||
+    Boolean(
+      value.tokens || value.eos_token_id != null || value.eosTokenId != null,
+    )
+  );
 }
 
 function bitsetToBytes(mask) {
-  return new Uint8Array(mask.buffer.slice(mask.byteOffset, mask.byteOffset + mask.byteLength));
+  return new Uint8Array(
+    mask.buffer.slice(mask.byteOffset, mask.byteOffset + mask.byteLength),
+  );
 }
 
 function bitmaskToLogitBias(bitmask, vocabSize) {
