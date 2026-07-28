@@ -85,6 +85,52 @@ test("matches UTF-8 literal tokens without decoding token boundaries", () => {
   assert.equal(allowed(interpreter.computeMask(), 3), true);
 });
 
+test("matches Unicode scalars with wildcard and character classes", () => {
+  const tokenizer = llguidance.createTokenizer({
+    tokens: [
+      [...encoder.encode("é")],
+      [...encoder.encode("日")],
+      [97],
+      [98],
+      [0xff],
+      [],
+    ],
+    eos_token_id: 5,
+  });
+  const wildcard = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "." },
+  });
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, token) =>
+      allowed(wildcard.computeMask(), token),
+    ),
+    [true, true, true, true, false],
+  );
+
+  const positive = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "[é日]" },
+  });
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, token) =>
+      allowed(positive.computeMask(), token),
+    ),
+    [true, true, false, false, false],
+  );
+
+  const negated = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "[^a]" },
+  });
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, token) =>
+      allowed(negated.computeMask(), token),
+    ),
+    [true, true, false, true, false],
+  );
+});
+
 test("regex trie preserves duplicate terminals and per-id special handling", () => {
   const source = Uint8Array.of(97, 98, 99);
   const tokenizer = new LLGuidanceTokenizer({
@@ -168,7 +214,97 @@ test("cached masks are isolated and invalidate only after state changes", () => 
   interpreter.commitToken(1);
   assert.equal(allowed(interpreter.computeMask(), 4), true);
   interpreter.commitToken(4);
-  assert.deepEqual(interpreter.computeMask(), { stop: true });
+  assert.deepEqual(interpreter.computeMask(), {
+    stop: true,
+    reason: "accepted",
+  });
+});
+
+test("distinguishes dead ends from successful completion", () => {
+  const tokenizer = llguidance.createTokenizer({
+    tokens: [[120], []],
+    eos_token_id: 1,
+  });
+  const interpreter = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "a" },
+  });
+
+  assert.deepEqual(interpreter.computeMask(), {
+    stop: true,
+    reason: "dead_end",
+  });
+});
+
+test("clones, rolls back, and discovers forced tokens without mutating", () => {
+  const tokenizer = llguidance.createTokenizer({
+    tokens: [[97], [98], [120], []],
+    eos_token_id: 3,
+  });
+  const interpreter = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "ab" },
+  });
+
+  assert.deepEqual(interpreter.computeFastForward(), [0, 1]);
+  assert.equal(allowed(interpreter.computeMask(), 0), true);
+  interpreter.commitToken(0);
+  const clone = interpreter.clone();
+  clone.commitToken(1);
+  assert.equal(allowed(clone.computeMask(), 3), true);
+  assert.equal(allowed(interpreter.computeMask(), 1), true);
+
+  interpreter.rollback(1);
+  assert.equal(allowed(interpreter.computeMask(), 0), true);
+  assert.throws(() => interpreter.commitToken(1), /doesn't satisfy/);
+});
+
+test("enforces configurable generation and compile limits", () => {
+  const tokenizer = llguidance.createTokenizer({
+    tokens: [[97], [98], []],
+    eos_token_id: 2,
+  });
+  const byteLimited = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "ab" },
+    limits: { maxOutputBytes: 1 },
+  });
+  byteLimited.commitToken(0);
+  assert.deepEqual(byteLimited.computeMask(), {
+    stop: true,
+    reason: "dead_end",
+  });
+
+  assert.throws(
+    () =>
+      llguidance.createInterpreter({
+        tokenizer,
+        response_format: { type: "regex", regex: "a{3}" },
+        limits: { maxRegexRepeat: 2 },
+      }),
+    /repetition count exceeds 2/,
+  );
+  assert.throws(
+    () =>
+      llguidance.createInterpreter({
+        tokenizer,
+        response_format: {
+          type: "json_schema",
+          json_schema: { allOf: [{ allOf: [{ type: "string" }] }] },
+        },
+        limits: { maxSchemaDepth: 2 },
+      }),
+    /schema nesting exceeds maxSchemaDepth \(2\)/,
+  );
+  assert.throws(
+    () =>
+      llguidance.createInterpreter({
+        tokenizer,
+        response_format: { type: "regex", regex: "a" },
+        limits: { maxTokens: 0 },
+      }),
+    /limits.maxTokens must be a positive safe integer/,
+  );
 });
 
 test("free rejects access even when a mask was cached", () => {

@@ -77,9 +77,9 @@ After `await loadLLGuidance()` or `await loadBundledLLGuidance()`, the runtime e
 | `LLMatcher.try_consume_tokens(tokens)`                              | `matcher.try_consume_tokens(tokens)`                         | Implemented.                                                                                                                                  |
 | `LLMatcher.validate_tokens(tokens)`                                 | `matcher.validate_tokens(tokens)`                            | Implemented by replaying on a fresh matcher.                                                                                                  |
 | `LLMatcher.reset()`                                                 | `matcher.reset()`                                            | Implemented.                                                                                                                                  |
-| `LLMatcher.rollback(num_tokens)`                                    | `matcher.rollback(num_tokens)`                               | Unsupported; throws explicitly.                                                                                                               |
-| `LLMatcher.deep_copy()`                                             | `matcher.deep_copy()`                                        | Unsupported; throws explicitly.                                                                                                               |
-| `LLMatcher.compute_ff_tokens()`                                     | `matcher.compute_ff_tokens()`                                | Compatibility stub; no fast-forward tokens are produced.                                                                                      |
+| `LLMatcher.rollback(num_tokens)`                                    | `matcher.rollback(num_tokens)`                               | Supported for committed tokens, including EOS.                                                                                                |
+| `LLMatcher.deep_copy()`                                             | `matcher.deep_copy()`                                        | Supported; the copy has independent interpreter state.                                                                                        |
+| `LLMatcher.compute_ff_tokens()`                                     | `matcher.compute_ff_tokens()`                                | Returns a non-mutating sequence of uniquely forced non-EOS tokens.                                                                            |
 | `LLMatcher.compute_ff_bytes()`                                      | `matcher.compute_ff_bytes()`                                 | Compatibility stub; returns empty bytes.                                                                                                      |
 | `LLMatcher.get_capture(name)`                                       | `matcher.get_capture(name)`                                  | Compatibility stub; returns `null`.                                                                                                           |
 | `LLMatcher.get_captures()`                                          | `matcher.get_captures()`                                     | Compatibility stub; returns `[]`.                                                                                                             |
@@ -99,9 +99,11 @@ After `await loadLLGuidance()` or `await loadBundledLLGuidance()`, the runtime e
 
 `LLTokenizer`, `LLInterpreter`, `LLMatcher`, and the convenience engine handles expose idempotent `free()` and `dispose()`. Using a disposed engine handle throws.
 
-An interpreter represents one mutable decoding stream. Cloning, beams, batches, and rollback require separate caller-managed interpreters.
+An interpreter represents one mutable decoding stream. Use `clone()` for
+speculative branches and `rollback(count)` to rewind committed tokens; callers
+still manage beam and batch scheduling.
 
-Lark compilation is intentionally not implemented. Use upstream `llguidance` when general grammar parity is required.
+These compatibility mappings describe the root runtime, where Lark compilation remains intentionally unavailable. The separate `llguidance/grammar` entry provides the subset and rule-name capture APIs documented in [GRAMMAR_SUPPORT.md](GRAMMAR_SUPPORT.md). Use upstream `llguidance` when general grammar parity is required.
 
 ## Convenience API
 

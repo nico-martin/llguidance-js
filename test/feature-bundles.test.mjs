@@ -6,12 +6,16 @@ import test from "node:test";
 
 import { loadJsonGuidance } from "../src/json-schema.ts";
 import { loadRegexGuidance } from "../src/regex.ts";
+import { loadGrammarGuidance } from "../src/grammar.ts";
 
 const distPackageUrl = new URL("../dist/package.json", import.meta.url);
 const hasStagedFeatureExports =
   existsSync(distPackageUrl) &&
   Boolean(
     JSON.parse(readFileSync(distPackageUrl, "utf8")).exports?.["./regex"],
+  ) &&
+  Boolean(
+    JSON.parse(readFileSync(distPackageUrl, "utf8")).exports?.["./grammar"],
   );
 
 function allowed(result, token) {
@@ -36,6 +40,7 @@ function assertGeneration(runtime, responseFormat, text) {
 test("source feature loaders are cached lean runtimes", async () => {
   assert.equal(loadRegexGuidance(), loadRegexGuidance());
   assert.equal(loadJsonGuidance(), loadJsonGuidance());
+  assert.equal(loadGrammarGuidance(), loadGrammarGuidance());
 
   const regex = await loadRegexGuidance();
   const json = await loadJsonGuidance();
@@ -106,8 +111,10 @@ test(
     const script = `
       const { loadRegexGuidance } = await import("llguidance/regex");
       const { loadJsonGuidance } = await import("llguidance/json-schema");
+      const { loadGrammarGuidance } = await import("llguidance/grammar");
       const regex = await loadRegexGuidance();
       const json = await loadJsonGuidance();
+      const grammar = await loadGrammarGuidance();
       if (regex !== await loadRegexGuidance() || json !== await loadJsonGuidance()) process.exit(2);
       const rt = regex.createTokenizer({ tokens: [[97], []], eosTokenId: 1 });
       const ri = regex.createInterpreter({ tokenizer: rt, response_format: { type: "regex", regex: "a" } });
@@ -117,6 +124,9 @@ test(
       if (!("mask" in ji.computeMask())) process.exit(4);
       try { regex.createInterpreter({ tokenizer: rt, response_format: { type: "json_object" } }); process.exit(5); } catch {}
       try { json.createInterpreter({ tokenizer: jt, response_format: { type: "regex", regex: "a" } }); process.exit(6); } catch {}
+      const gt = grammar.createTokenizer({ tokens: [[97], []], eosTokenId: 1 });
+      const gi = grammar.createInterpreter({ tokenizer: gt, grammar: 'start: "a"' });
+      if (!("mask" in gi.computeMask())) process.exit(7);
     `;
     const result = spawnSync(
       process.execPath,
@@ -147,6 +157,7 @@ test(
     );
     assert.equal(typecheck.status, 0, typecheck.stderr || typecheck.stdout);
 
+    const fullBundle = await readFile(new URL("browser.js", dist), "utf8");
     const regexBundle = await readFile(
       new URL("regex.browser.js", dist),
       "utf8",
@@ -155,12 +166,23 @@ test(
       new URL("json-schema.browser.js", dist),
       "utf8",
     );
+    const grammarBundle = await readFile(
+      new URL("grammar.browser.js", dist),
+      "utf8",
+    );
     assert.equal(
       regexBundle.includes("Initial JSON whitespace is not allowed"),
       false,
     );
     assert.equal(
       jsonBundle.includes("state was not created by this compiled regex"),
+      false,
+    );
+    for (const bundle of [fullBundle, regexBundle, jsonBundle]) {
+      assert.equal(bundle.includes('required rule "start" is missing'), false);
+    }
+    assert.equal(
+      grammarBundle.includes("Initial JSON whitespace is not allowed"),
       false,
     );
   },

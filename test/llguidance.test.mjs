@@ -98,7 +98,10 @@ test("runs one exact computeMask then commitToken stream", async () => {
     backtrack: 0,
     ffTokens: [],
   });
-  assert.deepEqual(interpreter.computeMask(), { stop: true });
+  assert.deepEqual(interpreter.computeMask(), {
+    stop: true,
+    reason: "accepted",
+  });
 });
 
 test("reuses a converted callable tokenizer across single-stream interpreters", async () => {

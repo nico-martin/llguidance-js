@@ -17,8 +17,8 @@ const interpreter = runtime.createInterpreter({
 - UTF-8 literals
 - Concatenation and alternation with `|`
 - Capturing-style groups `(...)` and noncapturing groups `(?:...)`; groups affect precedence only and do not expose captures
-- Byte wildcard `.`
-- ASCII character classes, ranges, and negated classes
+- Unicode-scalar wildcard `.`
+- ASCII character-class ranges and individual Unicode class members
 - ASCII shorthands `\d`, `\D`, `\w`, `\W`, `\s`, and `\S`
 - Quantifiers `*`, `+`, `?`, `{n}`, and `{n,m}`
 - Start and end anchors `^` and `$`
@@ -28,7 +28,10 @@ Repetition bounds are limited to 10,000. A compiled expression is limited to 100
 
 ## Byte Semantics
 
-Literal Unicode code points are encoded as UTF-8 byte sequences. Character classes and class ranges are ASCII-only. The wildcard and negated byte classes operate on individual bytes, not Unicode code points.
+Literal Unicode code points are encoded as UTF-8 byte sequences. The wildcard
+matches one valid Unicode scalar rather than one byte. Positive character
+classes can contain individual Unicode scalars; ranges remain ASCII-only.
+Negated ASCII classes also match non-ASCII Unicode scalars.
 
 Token boundaries do not affect matching. A UTF-8 sequence or regex literal can span multiple model tokens.
 
@@ -43,6 +46,6 @@ The compiler rejects unsupported constructs explicitly:
 - Word-boundary assertions
 - Unicode property classes such as `\p{Letter}`
 - Octal escapes
-- Non-ASCII character-class members and ranges
+- Non-ASCII character-class ranges and negated classes containing non-ASCII members
 
 This is not a drop-in implementation of JavaScript, PCRE, or upstream llguidance regex syntax.

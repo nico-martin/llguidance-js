@@ -58,7 +58,14 @@ import { loadJsonGuidance } from "llguidance/json-schema";
 const runtime = await loadJsonGuidance();
 ```
 
-The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`. These are independent static bundles with no dynamic imports, so the excluded engine is not downloaded or parsed.
+```js
+import { loadGrammarGuidance } from "llguidance/grammar";
+
+const runtime = await loadGrammarGuidance();
+const interpreter = runtime.createInterpreter({ tokenizer, grammar: lark });
+```
+
+The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`; the grammar entry accepts the documented practical Lark subset. These are independent static bundles with no dynamic imports, so excluded engines are not downloaded or parsed.
 
 ## Response Formats
 
@@ -96,10 +103,14 @@ An EOS token ID is required for custom token arrays. See [TOKENIZERS.md](docs/TO
 ## API
 
 - `loadBundledLLGuidance()` returns the cached runtime.
-- `loadRegexGuidance()` and `loadJsonGuidance()` return cached lean feature runtimes.
+- `loadRegexGuidance()`, `loadJsonGuidance()`, and `loadGrammarGuidance()` return cached lean feature runtimes.
 - `runtime.createTokenizer(config)` creates a tokenizer handle.
 - `runtime.createInterpreter(config)` creates one constrained-decoding stream.
-- `interpreter.computeMask()` returns `{ mask, vocabSize }` or `{ stop: true }`.
+- `interpreter.computeMask()` returns `{ mask, vocabSize }` or
+  `{ stop: true, reason: "accepted" | "dead_end" }`.
+- Interpreter configs accept a `limits` object with `maxTokens`,
+  `maxOutputBytes`, `maxRegexStates`, `maxRegexRepeat`, `maxSchemaDepth`, and
+  `maxJsonDepth` safety bounds.
 - `interpreter.commitToken(tokenId)` advances the stream.
 - Tokenizer, interpreter, and matcher handles expose idempotent `free()` and `dispose()`.
 
@@ -109,14 +120,16 @@ The runtime also exposes selected Python-style classes and helpers. See [API_MAP
 
 - [JSON Schema profile](docs/JSON_SCHEMA_PROFILE.md)
 - [Regex support](docs/REGEX_SUPPORT.md)
+- [Grammar support](docs/GRAMMAR_SUPPORT.md)
 - [Tokenizers](docs/TOKENIZERS.md)
+- [Worker integration](docs/WORKERS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Compatibility with upstream llguidance](docs/COMPATIBILITY.md)
 - [Python-to-JavaScript API mapping](docs/API_MAPPING.md)
 - [Performance](docs/PERFORMANCE.md)
 - [Development](docs/DEVELOPMENT.md)
 
-Lark grammars are not implemented by the TypeScript interpreter. See [COMPATIBILITY.md](docs/COMPATIBILITY.md) for unsupported upstream features.
+The root entry intentionally does not include Lark support. Use the optional `llguidance/grammar` entry for its documented subset, or upstream `llguidance` when full grammar compatibility is required.
 
 ## Development
 

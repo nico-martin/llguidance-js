@@ -22,7 +22,7 @@ Build only the JavaScript bundles and source maps:
 pnpm run build:js
 ```
 
-This writes readable full, `regex`, and `json-schema` browser/Node.js bundles and source maps. Pass `--minify` directly to the build script for minified output:
+This writes readable full, `regex`, `json-schema`, and `grammar` browser/Node.js bundles and source maps. Pass `--minify` directly to the build script for minified output:
 
 ```bash
 pnpm run build:js -- --minify
@@ -51,6 +51,16 @@ pnpm test
 
 The test suite includes direct engine tests, the JSON Schema profile suite, tokenizer bridge tests, public API tests, and selected upstream behavior ports under `test/upstream/`.
 
+Run the official JSON Schema Test Suite against the supported profile by
+passing a checkout's draft directory:
+
+```bash
+pnpm run test:schema-suite -- ../JSON-Schema-Test-Suite/tests/draft2020-12
+```
+
+The runner reports unsupported groups separately from assertion failures. The
+path can also be supplied through `JSON_SCHEMA_TEST_SUITE`.
+
 ## Benchmark
 
 ```bash
@@ -63,7 +73,8 @@ Benchmark results are non-contractual and depend on the host runtime. See [PERFO
 
 - `src/engine/core.ts`: compiler-injected tokenizer trie and interpreter masking
 - `src/engine/index.ts`: full compiler wiring
-- `src/engine/regex-only.ts` and `src/engine/json-only.ts`: feature compiler wiring
+- `src/engine/regex-only.ts`, `src/engine/json-only.ts`, and `src/engine/grammar-only.ts`: feature compiler wiring
+- `src/engine/grammar.ts`: practical Lark parser and incremental CFG engine
 - `src/engine/regex.ts`: incremental regex NFA
 - `src/engine/json-schema.ts`: JSON prefix parser and schema validator
 - `src/runtime.ts`: public runtime wrappers

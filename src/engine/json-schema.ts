@@ -20,8 +20,14 @@ export interface JsonPrefixState {
   readonly result: JsonPrefixResult;
 }
 
+export interface JsonUtf8PrefixState {
+  readonly bytes: Uint8Array;
+  readonly result: JsonPrefixResult;
+}
+
 export interface CompiledJsonSchema {
   readonly initial: JsonPrefixState;
+  readonly initialUtf8: JsonUtf8PrefixState;
   analyzeText(text: string): JsonPrefixResult;
   analyzeUtf8(bytes: Uint8Array | readonly number[]): JsonPrefixResult;
   isTextPrefixViable(text: string): boolean;
@@ -29,7 +35,18 @@ export interface CompiledJsonSchema {
   acceptsText(text: string): boolean;
   acceptsUtf8(bytes: Uint8Array | readonly number[]): boolean;
   append(state: JsonPrefixState, text: string): JsonPrefixState;
+  appendUtf8(
+    state: JsonUtf8PrefixState,
+    bytes: Uint8Array,
+  ): JsonUtf8PrefixState;
+  viable(state: JsonUtf8PrefixState): boolean;
+  accepting(state: JsonUtf8PrefixState): boolean;
   finish(state: JsonPrefixState): boolean;
+}
+
+export interface JsonSchemaCompileOptions {
+  maxSchemaDepth?: number;
+  maxJsonDepth?: number;
 }
 
 export class JsonSchemaCompileError extends Error {
@@ -74,17 +91,19 @@ class JsonParser {
   private position = 0;
   private readonly input: string;
   private readonly guidance: Guidance;
+  private readonly maxDepth: number;
 
-  constructor(input: string, guidance: Guidance) {
+  constructor(input: string, guidance: Guidance, maxDepth: number) {
     this.input = input;
     this.guidance = guidance;
+    this.maxDepth = maxDepth;
   }
 
   parse(): JsonNode {
     if (/^[\u0009\u000a\u000d\u0020]$/.test(this.input[0] ?? "")) {
       this.invalid("Initial JSON whitespace is not allowed");
     }
-    const node = this.value();
+    const node = this.value(0);
     this.space();
     if (this.position !== this.input.length) {
       this.invalid("Unexpected content after the JSON document");
@@ -92,14 +111,17 @@ class JsonParser {
     return node;
   }
 
-  private value(): JsonNode {
+  private value(depth: number): JsonNode {
+    if (depth > this.maxDepth) {
+      this.invalid(`JSON nesting exceeds maxJsonDepth (${this.maxDepth})`);
+    }
     this.space();
     if (this.position === this.input.length)
       this.missing("Expected a JSON value");
     const character = this.input[this.position];
     if (character === '"') return this.string();
-    if (character === "[") return this.array();
-    if (character === "{") return this.object();
+    if (character === "[") return this.array(depth);
+    if (character === "{") return this.object(depth);
     if (character === "t") return this.literal("true", true);
     if (character === "f") return this.literal("false", false);
     if (character === "n") return this.literal("null", null);
@@ -235,13 +257,13 @@ class JsonParser {
     return { kind: "number", value: Number(raw), raw };
   }
 
-  private array(): Extract<JsonNode, { kind: "array" }> {
+  private array(depth: number): Extract<JsonNode, { kind: "array" }> {
     this.position += 1;
     this.space();
     const items: JsonNode[] = [];
     if (this.take("]")) return { kind: "array", value: [], items };
     while (true) {
-      items.push(this.value());
+      items.push(this.value(depth + 1));
       this.space();
       if (this.take("]")) break;
       this.separator(this.guidance.itemSeparator, "array item separator");
@@ -252,7 +274,7 @@ class JsonParser {
     return { kind: "array", value: items.map((item) => item.value), items };
   }
 
-  private object(): Extract<JsonNode, { kind: "object" }> {
+  private object(depth: number): Extract<JsonNode, { kind: "object" }> {
     this.position += 1;
     this.space();
     const entries: Array<{ key: string; node: JsonNode }> = [];
@@ -266,7 +288,7 @@ class JsonParser {
       const key = this.string().value;
       this.space();
       this.separator(this.guidance.keySeparator, "object key separator");
-      const node = this.value();
+      const node = this.value(depth + 1);
       entries.push({ key, node });
       Object.defineProperty(value, key, {
         value: node.value,
@@ -348,6 +370,7 @@ const annotationKeywords = new Set([
 const validationKeywords = new Set([
   "$ref",
   "$defs",
+  "definitions",
   "type",
   "const",
   "enum",
@@ -364,6 +387,7 @@ const validationKeywords = new Set([
   "maxItems",
   "prefixItems",
   "items",
+  "additionalItems",
   "contains",
   "minContains",
   "maxContains",
@@ -374,6 +398,7 @@ const validationKeywords = new Set([
   "required",
   "dependentRequired",
   "dependentSchemas",
+  "dependencies",
   "additionalProperties",
   "minProperties",
   "maxProperties",
@@ -708,7 +733,17 @@ function compileChecks(root: Schema): Map<string, Schema> {
       visit(schema.propertyNames, `${path}.propertyNames`);
     if (schema.additionalProperties !== undefined)
       visit(schema.additionalProperties, `${path}.additionalProperties`);
-    if (schema.items !== undefined) visit(schema.items, `${path}.items`);
+    if (schema.items !== undefined) {
+      if (Array.isArray(schema.items)) {
+        schema.items.forEach((child, index) =>
+          visit(child, `${path}.items[${index}]`),
+        );
+      } else {
+        visit(schema.items, `${path}.items`);
+      }
+    }
+    if (schema.additionalItems !== undefined)
+      visit(schema.additionalItems, `${path}.additionalItems`);
     if (schema.contains !== undefined)
       visit(schema.contains, `${path}.contains`);
     if (schema.prefixItems !== undefined) {
@@ -764,10 +799,41 @@ function compileChecks(root: Schema): Map<string, Schema> {
       for (const [key, child] of Object.entries(dependencies))
         visit(child, `${path}.dependentSchemas[${JSON.stringify(key)}]`);
     }
+    if (schema.dependencies !== undefined) {
+      const dependencies = schemaObject(
+        schema.dependencies,
+        `${path}.dependencies`,
+      );
+      for (const [key, dependency] of Object.entries(dependencies)) {
+        if (Array.isArray(dependency)) {
+          if (dependency.some((name) => typeof name !== "string")) {
+            throw new JsonSchemaCompileError(
+              `${path}.dependencies[${JSON.stringify(key)}] must be a schema or array of strings`,
+            );
+          }
+          if (new Set(dependency).size !== dependency.length) {
+            throw new JsonSchemaCompileError(
+              `${path}.dependencies[${JSON.stringify(key)}] contains duplicates`,
+            );
+          }
+        } else {
+          visit(dependency, `${path}.dependencies[${JSON.stringify(key)}]`);
+        }
+      }
+    }
     if (schema.$defs !== undefined) {
       const definitions = schemaObject(schema.$defs, `${path}.$defs`);
       for (const [name, child] of Object.entries(definitions)) {
         visit(child, `${path}.$defs[${JSON.stringify(name)}]`);
+      }
+    }
+    if (schema.definitions !== undefined) {
+      const definitions = schemaObject(
+        schema.definitions,
+        `${path}.definitions`,
+      );
+      for (const [name, child] of Object.entries(definitions)) {
+        visit(child, `${path}.definitions[${JSON.stringify(name)}]`);
       }
     }
     if (schema.$ref !== undefined && typeof schema.$ref !== "string") {
@@ -1126,7 +1192,11 @@ function validateArray(
           break;
         }
   }
-  const prefix = (schema.prefixItems as Schema[] | undefined) ?? [];
+  const legacyTuple = Array.isArray(schema.items)
+    ? (schema.items as Schema[])
+    : undefined;
+  const prefix =
+    (schema.prefixItems as Schema[] | undefined) ?? legacyTuple ?? [];
   for (
     let index = 0;
     index < Math.min(prefix.length, node.items.length);
@@ -1135,14 +1205,13 @@ function validateArray(
     errors.push(
       ...validate(prefix[index], node.items[index], `${path}[${index}]`),
     );
-  if (schema.items !== undefined)
+  const remainingItems = legacyTuple
+    ? (schema.additionalItems as Schema | undefined)
+    : (schema.items as Schema | undefined);
+  if (remainingItems !== undefined)
     for (let index = prefix.length; index < node.items.length; index += 1)
       errors.push(
-        ...validate(
-          schema.items as Schema,
-          node.items[index],
-          `${path}[${index}]`,
-        ),
+        ...validate(remainingItems, node.items[index], `${path}[${index}]`),
       );
   if (schema.contains !== undefined) {
     const matches = node.items.filter(
@@ -1255,6 +1324,21 @@ function validateObject(
     (schema.dependentSchemas as Record<string, Schema> | undefined) ?? {};
   for (const [key, dependency] of Object.entries(dependentSchemas))
     if (byKey.has(key)) errors.push(...validate(dependency, node, path));
+  const legacyDependencies =
+    (schema.dependencies as Record<string, Schema | string[]> | undefined) ??
+    {};
+  for (const [key, dependency] of Object.entries(legacyDependencies)) {
+    if (!byKey.has(key)) continue;
+    if (Array.isArray(dependency)) {
+      for (const required of dependency)
+        if (!byKey.has(required))
+          errors.push(
+            `${path}: property ${JSON.stringify(key)} requires ${JSON.stringify(required)}`,
+          );
+    } else {
+      errors.push(...validate(dependency, node, path));
+    }
+  }
 }
 
 function propertyPath(path: string, key: string): string {
@@ -1871,8 +1955,17 @@ class SchemaPrefixParser {
     const result: SchemaSet = [];
     for (const schema of schemas) {
       if (typeof schema === "boolean") continue;
-      const prefix = (schema.prefixItems as Schema[] | undefined) ?? [];
-      const child = index < prefix.length ? prefix[index] : schema.items;
+      const legacyTuple = Array.isArray(schema.items)
+        ? (schema.items as Schema[])
+        : undefined;
+      const prefix =
+        (schema.prefixItems as Schema[] | undefined) ?? legacyTuple ?? [];
+      const child =
+        index < prefix.length
+          ? prefix[index]
+          : legacyTuple
+            ? schema.additionalItems
+            : schema.items;
       if (child === false) return null;
       if (child !== undefined && child !== true) result.push(child as Schema);
     }
@@ -2247,7 +2340,13 @@ function rawCodePointCanContinue(text: string): boolean {
 }
 
 /** Compile a supported JSON Schema into prefix and final-document checks. */
-export function compileJsonSchema(schema: unknown): CompiledJsonSchema {
+export function compileJsonSchema(
+  schema: unknown,
+  options: JsonSchemaCompileOptions = {},
+): CompiledJsonSchema {
+  const maxSchemaDepth = options.maxSchemaDepth ?? 128;
+  const maxJsonDepth = options.maxJsonDepth ?? 128;
+  assertSchemaDepth(schema, maxSchemaDepth);
   const root: Schema =
     typeof schema === "boolean" ? schema : schemaObject(schema, "schema");
   const references = compileChecks(root);
@@ -2255,7 +2354,7 @@ export function compileJsonSchema(schema: unknown): CompiledJsonSchema {
 
   const analyzeText = (text: string): JsonPrefixResult => {
     try {
-      const node = new JsonParser(text, guidance).parse();
+      const node = new JsonParser(text, guidance, maxJsonDepth).parse();
       const errors = validateDocument(root, node, references);
       const hasTrailingWhitespace =
         guidance.whitespaceFlexible && /[\u0009\u000a\u000d\u0020]$/.test(text);
@@ -2315,8 +2414,13 @@ export function compileJsonSchema(schema: unknown): CompiledJsonSchema {
   };
 
   const initialResult = analyzeText("");
+  const initialUtf8 = Object.freeze({
+    bytes: new Uint8Array(0),
+    result: initialResult,
+  });
   return {
     initial: Object.freeze({ text: "", result: initialResult }),
+    initialUtf8,
     analyzeText,
     analyzeUtf8,
     isTextPrefixViable: (text) => analyzeText(text).viable,
@@ -2327,6 +2431,40 @@ export function compileJsonSchema(schema: unknown): CompiledJsonSchema {
       const combined = state.text + text;
       return { text: combined, result: analyzeText(combined) };
     },
+    appendUtf8: (state, bytes) => {
+      const combined = appendBytes(state.bytes, bytes);
+      return { bytes: combined, result: analyzeUtf8(combined) };
+    },
+    viable: (state) => state.result.viable,
+    accepting: (state) => state.result.accepted,
     finish: (state) => state.result.accepted,
   };
+}
+
+function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const result = new Uint8Array(left.length + right.length);
+  result.set(left);
+  result.set(right, left.length);
+  return result;
+}
+
+function assertSchemaDepth(schema: unknown, maxDepth: number): void {
+  const active = new WeakSet<object>();
+  const visit = (value: unknown, depth: number): void => {
+    if (value === null || typeof value !== "object") return;
+    if (depth > maxDepth) {
+      throw new JsonSchemaCompileError(
+        `schema nesting exceeds maxSchemaDepth (${maxDepth})`,
+      );
+    }
+    if (active.has(value)) {
+      throw new JsonSchemaCompileError("schema must not contain object cycles");
+    }
+    active.add(value);
+    for (const child of Array.isArray(value) ? value : Object.values(value)) {
+      visit(child, depth + 1);
+    }
+    active.delete(value);
+  };
+  visit(schema, 0);
 }

@@ -287,6 +287,36 @@ test("resolves general local JSON Pointers, escaped segments, and nested defs", 
   );
 });
 
+test("supports draft-07 definitions, dependencies, and tuple items", () => {
+  const referenced = {
+    definitions: { answer: { type: "integer", minimum: 1 } },
+    $ref: "#/definitions/answer",
+  };
+  assertEveryBytePrefixAccepted(referenced, "2");
+  assert.equal(schemaAccepts(referenced, "0"), false);
+
+  const dependencies = {
+    type: "object",
+    properties: { a: true, b: true, c: { type: "integer" } },
+    dependencies: {
+      a: ["b"],
+      b: { required: ["c"] },
+    },
+  };
+  assertEveryBytePrefixAccepted(dependencies, '{"a":1,"b":2,"c":3}');
+  assert.equal(schemaAccepts(dependencies, '{"a":1}'), false);
+  assert.equal(schemaAccepts(dependencies, '{"b":2}'), false);
+
+  const tuple = {
+    type: "array",
+    items: [{ type: "string" }, { type: "integer" }],
+    additionalItems: false,
+  };
+  assertEveryBytePrefixAccepted(tuple, '["x",1]');
+  assert.equal(schemaAccepts(tuple, '["x","y"]'), false);
+  assert.equal(schemaAccepts(tuple, '["x",1,true]'), false);
+});
+
 test("rejects malformed shapes for the production profile at compile time", () => {
   const invalid = [
     { not: [] },

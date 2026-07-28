@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
 const packageRoot = new URL("../", import.meta.url);
@@ -11,9 +11,11 @@ const publicDocs = [
   "COMPATIBILITY.md",
   "DEVELOPMENT.md",
   "JSON_SCHEMA_PROFILE.md",
+  "GRAMMAR_SUPPORT.md",
   "PERFORMANCE.md",
   "REGEX_SUPPORT.md",
   "TOKENIZERS.md",
+  "WORKERS.md",
 ];
 
 const run = (command, args, options = {}) => {
@@ -93,7 +95,7 @@ export interface LLTokenizer extends Disposable {
 
 export type LLGuidanceMaskResult =
   | { mask: Uint32Array; vocabSize: number }
-  | { stop: true };
+  | { stop: true; reason: "accepted" | "dead_end" };
 
 export interface LLGuidanceCommitResult {
   stop: boolean;
@@ -104,6 +106,18 @@ export interface LLGuidanceCommitResult {
 export interface LLGuidanceInterpreterHandle extends Disposable {
   computeMask(): LLGuidanceMaskResult;
   commitToken(sampledToken: number): LLGuidanceCommitResult;
+  clone(): LLGuidanceInterpreterHandle;
+  rollback(count: number): void;
+  computeFastForward(maxTokens?: number): number[];
+}
+
+export interface LLGuidanceLimits {
+  maxTokens?: number;
+  maxOutputBytes?: number;
+  maxRegexStates?: number;
+  maxRegexRepeat?: number;
+  maxSchemaDepth?: number;
+  maxJsonDepth?: number;
 }
 
 export interface LLInterpreter extends LLGuidanceInterpreterHandle {
@@ -128,12 +142,16 @@ export interface LLMatcher extends Disposable {
   is_accepting(): boolean;
   is_stopped(): boolean;
   stop_reason(): string;
+  compute_ff_tokens(): number[];
+  rollback(numTokens: number): void;
+  deep_copy(): LLMatcher;
 }
 
 export type LLGuidanceTokenizerSource = LLGuidanceTokenizerConfig | TransformersTokenizerLike | LLTokenizer | LLGuidanceTokenizerHandle;
 
 export type LLGuidanceInterpreterConfig = {
   tokenizer: LLGuidanceTokenizerSource;
+  limits?: LLGuidanceLimits;
   response_format?: LLGuidanceResponseFormat;
   responseFormat?: LLGuidanceResponseFormat;
   grammar?: string;
@@ -230,6 +248,38 @@ await Promise.all([
   ),
 ]);
 
+const typesDir = new URL("types/", distDir);
+await mkdir(typesDir, { recursive: true });
+run("pnpm", [
+  "exec",
+  "tsc",
+  "--noEmit",
+  "false",
+  "--declaration",
+  "--emitDeclarationOnly",
+  "--outDir",
+  new URL(typesDir).pathname,
+]);
+await rewriteDeclarationImports(typesDir);
+await Promise.all([
+  writeFile(
+    new URL("llguidance.d.ts", distDir),
+    'export * from "./types/llguidance.js";\n',
+  ),
+  writeFile(
+    new URL("regex.d.ts", distDir),
+    'export * from "./types/regex.js";\n',
+  ),
+  writeFile(
+    new URL("json-schema.d.ts", distDir),
+    'export * from "./types/json-schema.js";\n',
+  ),
+  writeFile(
+    new URL("grammar.d.ts", distDir),
+    'export * from "./types/grammar.js";\n',
+  ),
+]);
+
 await writeFile(
   new URL("package.json", distDir),
   `${JSON.stringify(
@@ -260,6 +310,12 @@ await writeFile(
         "json-schema.node.js",
         "json-schema.node.js.map",
         "json-schema.d.ts",
+        "grammar.browser.js",
+        "grammar.browser.js.map",
+        "grammar.node.js",
+        "grammar.node.js.map",
+        "grammar.d.ts",
+        "types",
         "docs",
       ],
       exports: {
@@ -284,6 +340,13 @@ await writeFile(
           import: "./json-schema.browser.js",
           default: "./json-schema.browser.js",
         },
+        "./grammar": {
+          types: "./grammar.d.ts",
+          browser: "./grammar.browser.js",
+          node: "./grammar.node.js",
+          import: "./grammar.browser.js",
+          default: "./grammar.browser.js",
+        },
       },
       sideEffects: false,
       publishConfig: sourcePackage.publishConfig,
@@ -300,5 +363,21 @@ await Promise.all(
     cp(new URL(`docs/${file}`, packageRoot), new URL(`docs/${file}`, distDir)),
   ),
 );
+
+async function rewriteDeclarationImports(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  await Promise.all(
+    entries.map(async (entry) => {
+      const url = new URL(
+        entry.name + (entry.isDirectory() ? "/" : ""),
+        directory,
+      );
+      if (entry.isDirectory()) return rewriteDeclarationImports(url);
+      if (!entry.name.endsWith(".d.ts")) return;
+      const declaration = await readFile(url, "utf8");
+      await writeFile(url, declaration.replaceAll('.ts"', '.js"'));
+    }),
+  );
+}
 
 console.log(`Built publishable package in ${distDir.pathname}`);

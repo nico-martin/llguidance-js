@@ -15,7 +15,7 @@ import { extractLLGuidanceTokenizerConfig } from "./tokenizer_bridge.ts";
 
 type Options = Record<string, unknown>;
 type GrammarConfig = Options | null | undefined;
-type StopReason = "NotStopped" | "NoExtension";
+export type StopReason = "NotStopped" | "EndOfSentence" | "NoExtension";
 type EngineTokenizer = InstanceType<EngineModule["LLGuidanceTokenizer"]>;
 type EngineInterpreter = InstanceType<EngineModule["LLGuidanceInterpreter"]>;
 
@@ -42,7 +42,91 @@ export interface LLGuidanceInterpreterConfig extends InterpreterConfig {
   grammar_format?: LLGuidanceGrammarFormat;
 }
 
-export function createLLGuidanceRuntime(mod: EngineModule) {
+export interface LLTokenizerInstance {
+  readonly vocab_size: number;
+  readonly eos_token: number;
+  readonly eos_tokens: number[];
+  readonly is_canonical: boolean;
+  free(): void;
+  dispose(): void;
+}
+
+export interface LLInterpreterInstance extends InterpreterHandle {
+  compute_mask(): [Uint8Array | null, string];
+  compute_mask_into(target: Uint8Array): string;
+  commit_token(sampledToken: number | null | undefined): [number, number[]];
+  is_accepting(): boolean;
+  stop_reason(): StopReason;
+  has_pending_stop(): boolean;
+  clone(): LLInterpreterInstance;
+}
+
+export interface LLMatcherInstance {
+  compute_bitmask(): Uint8Array;
+  compute_logit_bias(): Uint8Array;
+  consume_token(sampledToken: number): boolean;
+  consume_tokens(sampledTokens: readonly number[]): boolean;
+  try_consume_tokens(sampledTokens: readonly number[]): number;
+  validate_tokens(tokens: readonly number[]): number;
+  is_error(): boolean;
+  get_error(): string;
+  get_grammar_warnings(): string[];
+  is_accepting(): boolean;
+  is_stopped(): boolean;
+  stop_reason(): StopReason;
+  compute_ff_tokens(): number[];
+  compute_ff_bytes(): Uint8Array;
+  reset(): boolean;
+  rollback(numTokens: number): void;
+  deep_copy(): LLMatcherInstance;
+  get_capture(): null;
+  get_captures(): never[];
+  free(): void;
+  dispose(): void;
+}
+
+export interface LLMatcherConstructor {
+  new (
+    tokenizer: TokenizerSource,
+    grammar: string,
+    options?: Options,
+  ): LLMatcherInstance;
+  grammar_from_json_schema(schema: unknown): string;
+  grammar_from_lark(lark: string): string;
+  grammar_from_regex(regex: string): string;
+  validate_grammar(grammar: string, tokenizer?: TokenizerSource | null): string;
+  validate_grammar_with_warnings(
+    grammar: string,
+    tokenizer?: TokenizerSource | null,
+  ): [boolean, string[]];
+}
+
+export interface LLGuidanceRuntime {
+  LLTokenizer: new (
+    tokenizer: TokenizerSource | null | undefined,
+    options?: TokenizerConfig,
+  ) => LLTokenizerInstance;
+  LLInterpreter: new (
+    tokenizer: TokenizerSource,
+    grammarOrConfig: string | GrammarConfig,
+    options?: Options,
+  ) => LLInterpreterInstance;
+  LLMatcher: LLMatcherConstructor;
+  JsonCompiler: new (options?: Options) => {
+    readonly options: Options;
+    compile(schema: unknown): string;
+  };
+  LarkCompiler: new () => { compile(lark: string): string };
+  RegexCompiler: new () => { compile(regex: string): string };
+  grammar_from(format: LLGuidanceGrammarFormat, text: unknown): string;
+  grammarFrom(format: LLGuidanceGrammarFormat, text: unknown): string;
+  regex_to_lark(regex: unknown): string;
+  get_version(): string;
+  createTokenizer(config?: TokenizerConfig): TokenizerHandle;
+  createInterpreter(config: LLGuidanceInterpreterConfig): InterpreterHandle;
+}
+
+export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
   const { createTokenizer, createInterpreter, resolveTokenizer } =
     createHandleRuntime<
       EngineTokenizer,
@@ -83,11 +167,11 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
   }
 
   class LLInterpreter implements InterpreterHandle {
-    readonly _tokenizer: EngineTokenizer;
-    private readonly _interpreter: EngineInterpreter;
-    private _stopped = false;
-    private _accepting = false;
-    private _stopReason: StopReason = "NotStopped";
+    _tokenizer: EngineTokenizer;
+    _interpreter: EngineInterpreter;
+    _stopped = false;
+    _accepting = false;
+    _stopReason: StopReason = "NotStopped";
 
     constructor(
       tokenizer: TokenizerSource,
@@ -104,8 +188,11 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
     compute_mask(): [Uint8Array | null, string] {
       const result = this._interpreter.computeMask();
       this._stopped = "stop" in result && result.stop;
-      this._accepting = this._stopped;
-      if (this._stopped) this._stopReason = "NoExtension";
+      this._accepting = isAcceptingResult(result, this._tokenizer.eosToken());
+      if ("stop" in result) {
+        this._stopReason =
+          result.reason === "accepted" ? "EndOfSentence" : "NoExtension";
+      }
       return [
         "mask" in result ? bitsetToBytes(result.mask) : null,
         JSON.stringify(result),
@@ -122,7 +209,8 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
       if (sampledToken == null) return [0, []];
       const result = this._interpreter.commitToken(sampledToken);
       this._stopped = Boolean(result.stop);
-      if (this._stopped) this._stopReason = "NoExtension";
+      this._accepting = this._stopped;
+      if (this._stopped) this._stopReason = "EndOfSentence";
       return [result.backtrack ?? 0, result.ffTokens ?? []];
     }
 
@@ -146,6 +234,35 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
       return this._interpreter.commitToken(sampledToken);
     }
 
+    clone(): LLInterpreter {
+      const clone = Object.create(LLInterpreter.prototype) as LLInterpreter;
+      clone._tokenizer = this._tokenizer;
+      clone._interpreter = this._interpreter.clone() as EngineInterpreter;
+      clone._stopped = this._stopped;
+      clone._accepting = this._accepting;
+      clone._stopReason = this._stopReason;
+      return clone;
+    }
+
+    rollback(count: number): void {
+      this._interpreter.rollback(count);
+      this._stopped = false;
+      this._accepting = false;
+      this._stopReason = "NotStopped";
+    }
+
+    computeFastForward(maxTokens?: number): number[] {
+      return this._interpreter.computeFastForward(maxTokens);
+    }
+
+    getCapture(name: string) {
+      return this._interpreter.getCapture(name);
+    }
+
+    getCaptures(name?: string) {
+      return this._interpreter.getCaptures(name);
+    }
+
     free(): void {
       this._interpreter.free();
     }
@@ -156,14 +273,14 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
   }
 
   class LLMatcher {
-    readonly _tokenizer: EngineTokenizer;
-    private readonly _grammar: string;
-    private readonly _options: Options;
+    _tokenizer: EngineTokenizer;
+    _grammar: string;
+    _options: Options;
     _interpreter: EngineInterpreter;
-    private _error = "";
-    private _stopped = false;
-    private _accepting = false;
-    private _stopReason: StopReason = "NotStopped";
+    _error = "";
+    _stopped = false;
+    _accepting = false;
+    _stopReason: StopReason = "NotStopped";
 
     constructor(
       tokenizer: TokenizerSource,
@@ -220,7 +337,11 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
     compute_bitmask(): Uint8Array {
       const result = this._interpreter.computeMask();
       this._stopped = "stop" in result && result.stop;
-      this._accepting = this._stopped;
+      this._accepting = isAcceptingResult(result, this._tokenizer.eosToken());
+      if ("stop" in result) {
+        this._stopReason =
+          result.reason === "accepted" ? "EndOfSentence" : "NoExtension";
+      }
       return "mask" in result ? bitsetToBytes(result.mask) : new Uint8Array(0);
     }
 
@@ -235,6 +356,8 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
       try {
         const result = this._interpreter.commitToken(sampledToken);
         this._stopped = Boolean(result.stop);
+        this._accepting = this._stopped;
+        if (this._stopped) this._stopReason = "EndOfSentence";
         return true;
       } catch (error) {
         this._error = error instanceof Error ? error.message : String(error);
@@ -293,8 +416,7 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
     }
 
     compute_ff_tokens(): number[] {
-      this._interpreter.computeMask();
-      return [];
+      return this._interpreter.computeFastForward();
     }
 
     compute_ff_bytes(): Uint8Array {
@@ -323,16 +445,25 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
       this.free();
     }
 
-    rollback(): never {
-      throw new Error(
-        "LLMatcher.rollback() is not implemented in the TypeScript core backend yet",
-      );
+    rollback(numTokens: number): void {
+      this._interpreter.rollback(numTokens);
+      this._error = "";
+      this._stopped = false;
+      this._accepting = false;
+      this._stopReason = "NotStopped";
     }
 
-    deep_copy(): never {
-      throw new Error(
-        "LLMatcher.deep_copy() is not implemented in the TypeScript core backend yet",
-      );
+    deep_copy(): LLMatcher {
+      const copy = Object.create(LLMatcher.prototype) as LLMatcher;
+      copy._tokenizer = this._tokenizer;
+      copy._grammar = this._grammar;
+      copy._options = this._options;
+      copy._interpreter = this._interpreter.clone() as EngineInterpreter;
+      copy._error = this._error;
+      copy._stopped = this._stopped;
+      copy._accepting = this._accepting;
+      copy._stopReason = this._stopReason;
+      return copy;
     }
 
     get_capture(): null {
@@ -398,8 +529,6 @@ export function createLLGuidanceRuntime(mod: EngineModule) {
   };
 }
 
-export type LLGuidanceRuntime = ReturnType<typeof createLLGuidanceRuntime>;
-
 function normalizeInterpreterConfig(
   grammarOrConfig: string | GrammarConfig,
   options: Options = {},
@@ -437,6 +566,11 @@ function bitsetToBytes(mask: Uint32Array): Uint8Array {
   const bytes = new Uint8Array(mask.byteLength);
   bytes.set(new Uint8Array(mask.buffer, mask.byteOffset, mask.byteLength));
   return bytes;
+}
+
+function isAcceptingResult(result: MaskResult, eosToken: number): boolean {
+  if ("stop" in result) return result.reason === "accepted";
+  return (result.mask[eosToken >>> 5] & (1 << (eosToken & 31))) !== 0;
 }
 
 function bitmaskToLogitBias(

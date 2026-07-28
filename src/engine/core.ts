@@ -15,6 +15,26 @@ export interface TokenizerConfig {
   special_token_ids?: readonly number[];
 }
 
+export interface GuidanceLimits {
+  maxTokens?: number;
+  maxOutputBytes?: number;
+  maxRegexStates?: number;
+  maxRegexRepeat?: number;
+  maxSchemaDepth?: number;
+  maxJsonDepth?: number;
+}
+
+type NormalizedGuidanceLimits = Required<GuidanceLimits>;
+
+const DEFAULT_LIMITS: NormalizedGuidanceLimits = {
+  maxTokens: 100_000,
+  maxOutputBytes: 1_048_576,
+  maxRegexStates: 100_000,
+  maxRegexRepeat: 10_000,
+  maxSchemaDepth: 128,
+  maxJsonDepth: 128,
+};
+
 type Marker = {
   [MARKER_KEY]: typeof MARKER_VERSION;
   type: "regex" | "json_schema" | "lark";
@@ -30,21 +50,50 @@ interface CompiledRegex {
   accepting(state: RegexState): boolean;
 }
 
-interface CompiledJsonSchema {
-  isUtf8PrefixViable(bytes: Uint8Array): boolean;
-  acceptsUtf8(bytes: Uint8Array): boolean;
+export interface GrammarCapture {
+  readonly name: string;
+  readonly value: string;
+  readonly start: number;
+  readonly end: number;
 }
 
+interface CompiledLark extends CompiledRegex {
+  captures(state: RegexState): GrammarCapture[];
+}
+
+interface CompiledJsonSchema {
+  readonly initialUtf8: JsonEngineState;
+  appendUtf8(state: JsonEngineState, bytes: Uint8Array): JsonEngineState;
+  viable(state: JsonEngineState): boolean;
+  accepting(state: JsonEngineState): boolean;
+}
+
+interface JsonEngineState {}
+
 export type EngineCompilers = {
-  compileRegex?: (source: string) => CompiledRegex;
-  compileJsonSchema?: (schema: unknown) => CompiledJsonSchema;
+  compileRegex?: (source: string, limits?: GuidanceLimits) => CompiledRegex;
+  compileLark?: (source: string, limits?: GuidanceLimits) => CompiledLark;
+  compileJsonSchema?: (
+    schema: unknown,
+    limits?: GuidanceLimits,
+  ) => CompiledJsonSchema;
 };
 
-export type EngineModule = ReturnType<typeof createEngine>;
+export interface EngineModule {
+  LLGuidanceTokenizer: typeof LLGuidanceTokenizer;
+  LLGuidanceInterpreter: new (
+    tokenizer: LLGuidanceTokenizer,
+    config: unknown,
+  ) => InterpreterHandle;
+  grammarFrom: typeof grammarFrom;
+  grammarFromJsonSchema: typeof grammarFromJsonSchema;
+  grammarFromLark: typeof grammarFromLark;
+  grammarFromRegex: typeof grammarFromRegex;
+}
 
 type Engine =
   | { kind: "regex"; compiled: CompiledRegex; state: RegexState }
-  | { kind: "json"; compiled: CompiledJsonSchema; bytes: Uint8Array };
+  | { kind: "json"; compiled: CompiledJsonSchema; state: JsonEngineState };
 
 type TokenTrieNode = {
   readonly children: Map<number, TokenTrieNode>;
@@ -58,8 +107,10 @@ type TokenizerData = {
   readonly special: ReadonlySet<number>;
 };
 
+export type StopReason = "accepted" | "dead_end";
+
 export type MaskResult =
-  { mask: Uint32Array; vocabSize: number } | { stop: true };
+  { mask: Uint32Array; vocabSize: number } | { stop: true; reason: StopReason };
 
 export interface CommitResult {
   stop: boolean;
@@ -79,6 +130,11 @@ export interface TokenizerHandle {
 export interface InterpreterHandle {
   computeMask(): MaskResult;
   commitToken(token: number): CommitResult;
+  clone(): InterpreterHandle;
+  rollback(count: number): void;
+  computeFastForward(maxTokens?: number): number[];
+  getCapture(name: string): GrammarCapture | null;
+  getCaptures(name?: string): GrammarCapture[];
   free(): void;
   dispose(): void;
 }
@@ -194,11 +250,16 @@ export class LLGuidanceTokenizer {
 }
 
 class CoreLLGuidanceInterpreter {
-  private readonly tokenizer: LLGuidanceTokenizer;
+  private tokenizer: LLGuidanceTokenizer;
   private engine: Engine;
   private stopped = false;
   private freed = false;
   private maskCache: MaskResult | null = null;
+  private committedTokens: number[] = [];
+  private limits: NormalizedGuidanceLimits;
+  private generatedTokens = 0;
+  private generatedBytes = 0;
+  private jsonCandidates = new Map<number, JsonEngineState>();
 
   constructor(
     tokenizer: LLGuidanceTokenizer,
@@ -210,37 +271,47 @@ class CoreLLGuidanceInterpreter {
     }
     this.tokenizer = tokenizer;
     const marker = markerFromInterpreterConfig(config);
-    if (marker.type === "lark") throw new Error(LARK_UNSUPPORTED);
-    if (marker.type === "regex") {
+    this.limits = limitsFromInterpreterConfig(config);
+    if (marker.type === "lark") {
+      if (compilers.compileLark === undefined)
+        throw new Error(LARK_UNSUPPORTED);
+      if (typeof marker.value !== "string") {
+        throw new TypeError("Lark grammar must be a string");
+      }
+      const compiled = compilers.compileLark(marker.value, this.limits);
+      this.engine = { kind: "regex", compiled, state: compiled.initialState };
+    } else if (marker.type === "regex") {
       if (compilers.compileRegex === undefined) {
         throw featureUnavailable("regex");
       }
       if (typeof marker.value !== "string") {
         throw new TypeError("regex grammar must be a string");
       }
-      const compiled = compilers.compileRegex(marker.value);
+      const compiled = compilers.compileRegex(marker.value, this.limits);
       this.engine = { kind: "regex", compiled, state: compiled.initialState };
     } else {
       if (compilers.compileJsonSchema === undefined) {
         throw featureUnavailable("JSON Schema");
       }
-      const compiled = compilers.compileJsonSchema(marker.value);
-      this.engine = { kind: "json", compiled, bytes: new Uint8Array(0) };
+      const compiled = compilers.compileJsonSchema(marker.value, this.limits);
+      this.engine = { kind: "json", compiled, state: compiled.initialUtf8 };
     }
   }
 
   computeMask(): MaskResult {
     this.assertLive();
-    if (this.stopped) return { stop: true };
+    if (this.stopped) return { stop: true, reason: "accepted" };
     const vocabSize = this.tokenizer.vocabSize();
     if (this.maskCache !== null) return cloneMaskResult(this.maskCache);
 
+    this.jsonCandidates.clear();
     const mask = new Uint32Array(Math.ceil(vocabSize / 32));
     const eligible =
       this.engine.kind === "regex"
         ? this.computeRegexMask(mask)
         : this.computeJsonMask(mask);
-    this.maskCache = eligible === 0 ? { stop: true } : { mask, vocabSize };
+    this.maskCache =
+      eligible === 0 ? { stop: true, reason: "dead_end" } : { mask, vocabSize };
     return cloneMaskResult(this.maskCache);
   }
 
@@ -257,31 +328,164 @@ class CoreLLGuidanceInterpreter {
     }
 
     if (token === this.tokenizer.eosToken()) {
+      this.committedTokens.push(token);
       this.stopped = true;
       this.maskCache = null;
       return { stop: true, backtrack: 0, ffTokens: [] };
     }
 
     const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    if (this.nonEosTokenCount() >= this.limits.maxTokens) {
+      throw new Error(
+        `generation exceeds maxTokens (${this.limits.maxTokens})`,
+      );
+    }
+    if (this.outputByteLength() + bytes.length > this.limits.maxOutputBytes) {
+      throw new Error(
+        `generation exceeds maxOutputBytes (${this.limits.maxOutputBytes})`,
+      );
+    }
     if (this.engine.kind === "regex") {
       this.engine.state = this.engine.compiled.advance(
         this.engine.state,
         bytes,
       );
     } else {
-      this.engine.bytes = appendBytes(this.engine.bytes, bytes);
+      this.engine.state =
+        this.jsonCandidates.get(token) ??
+        this.engine.compiled.appendUtf8(this.engine.state, bytes);
     }
+    this.committedTokens.push(token);
+    this.generatedTokens += 1;
+    this.generatedBytes += bytes.length;
     this.maskCache = null;
+    this.jsonCandidates.clear();
     return { stop: false, backtrack: 0, ffTokens: [] };
+  }
+
+  clone(): this {
+    this.assertLive();
+    const copy = Object.create(Object.getPrototypeOf(this)) as this;
+    copy.tokenizer = this.tokenizer;
+    copy.engine =
+      this.engine.kind === "regex" ? { ...this.engine } : { ...this.engine };
+    copy.stopped = this.stopped;
+    copy.freed = false;
+    copy.maskCache =
+      this.maskCache === null ? null : cloneMaskResult(this.maskCache);
+    copy.committedTokens = [...this.committedTokens];
+    copy.limits = { ...this.limits };
+    copy.generatedTokens = this.generatedTokens;
+    copy.generatedBytes = this.generatedBytes;
+    copy.jsonCandidates = new Map();
+    return copy;
+  }
+
+  rollback(count: number): void {
+    this.assertLive();
+    if (
+      !Number.isInteger(count) ||
+      count < 0 ||
+      count > this.committedTokens.length
+    ) {
+      throw new RangeError(
+        `rollback count ${String(count)} is out of range for ${this.committedTokens.length} committed tokens`,
+      );
+    }
+    if (count === 0) return;
+    this.committedTokens.length -= count;
+    this.resetFromHistory();
+  }
+
+  computeFastForward(maxTokens = 32): number[] {
+    this.assertLive();
+    if (!Number.isInteger(maxTokens) || maxTokens < 0) {
+      throw new RangeError("maxTokens must be a non-negative integer");
+    }
+    const branch = this.clone();
+    const result: number[] = [];
+    for (let index = 0; index < maxTokens; index += 1) {
+      const next = branch.computeMask();
+      if (!("mask" in next)) break;
+      const token = singleAllowedToken(
+        next.mask,
+        next.vocabSize,
+        this.tokenizer.eosToken(),
+      );
+      if (token === null) break;
+      result.push(token);
+      branch.commitToken(token);
+    }
+    branch.free();
+    return result;
+  }
+
+  getCapture(name: string): GrammarCapture | null {
+    if (typeof name !== "string")
+      throw new TypeError("capture name must be a string");
+    const captures = this.getCaptures(name);
+    return captures.at(-1) ?? null;
+  }
+
+  getCaptures(name?: string): GrammarCapture[] {
+    this.assertLive();
+    if (name !== undefined && typeof name !== "string") {
+      throw new TypeError("capture name must be a string");
+    }
+    if (this.engine.kind !== "regex" || !("captures" in this.engine.compiled)) {
+      return [];
+    }
+    const captures = (this.engine.compiled as CompiledLark).captures(
+      this.engine.state,
+    );
+    return name === undefined
+      ? captures.map((capture) => ({ ...capture }))
+      : captures
+          .filter((capture) => capture.name === name)
+          .map((capture) => ({ ...capture }));
   }
 
   free(): void {
     this.maskCache = null;
+    this.jsonCandidates.clear();
     this.freed = true;
   }
 
   dispose(): void {
     this.free();
+  }
+
+  private resetFromHistory(): void {
+    if (this.engine.kind === "regex") {
+      this.engine.state = this.engine.compiled.initialState;
+    } else {
+      this.engine.state = this.engine.compiled.initialUtf8;
+    }
+    this.stopped = false;
+    this.generatedTokens = 0;
+    this.generatedBytes = 0;
+    for (const token of this.committedTokens) {
+      if (token === this.tokenizer.eosToken()) {
+        this.stopped = true;
+        continue;
+      }
+      const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+      this.generatedTokens += 1;
+      this.generatedBytes += bytes.length;
+      if (this.engine.kind === "regex") {
+        this.engine.state = this.engine.compiled.advance(
+          this.engine.state,
+          bytes,
+        );
+      } else {
+        this.engine.state = this.engine.compiled.appendUtf8(
+          this.engine.state,
+          bytes,
+        );
+      }
+    }
+    this.maskCache = null;
+    this.jsonCandidates.clear();
   }
 
   private computeRegexMask(mask: Uint32Array): number {
@@ -301,6 +505,8 @@ class CoreLLGuidanceInterpreter {
       const current = stack.pop()!;
       for (const token of current.node.terminalTokenIds) {
         if (token === data.eos || isSpecialToken(data, token)) continue;
+        if (!this.withinGenerationLimits(data.tokenBytes[token].length))
+          continue;
         setMaskBit(mask, token);
         eligible += 1;
       }
@@ -317,7 +523,7 @@ class CoreLLGuidanceInterpreter {
     if (this.engine.kind !== "json") throw new Error("invalid JSON engine");
     const data = getTokenizerData(this.tokenizer);
     let eligible = 0;
-    if (this.engine.compiled.acceptsUtf8(this.engine.bytes)) {
+    if (this.engine.compiled.accepting(this.engine.state)) {
       setMaskBit(mask, data.eos);
       eligible += 1;
     }
@@ -330,14 +536,16 @@ class CoreLLGuidanceInterpreter {
       );
       if (firstNormal !== undefined) {
         const bytes = data.tokenBytes[firstNormal];
-        if (
-          this.engine.compiled.isUtf8PrefixViable(
-            appendBytes(this.engine.bytes, bytes),
-          )
-        ) {
+        if (this.withinGenerationLimits(bytes.length)) {
+          const candidate = this.engine.compiled.appendUtf8(
+            this.engine.state,
+            bytes,
+          );
+          if (!this.engine.compiled.viable(candidate)) continue;
           for (const token of node.terminalTokenIds) {
             if (token === data.eos || isSpecialToken(data, token)) continue;
             setMaskBit(mask, token);
+            this.jsonCandidates.set(token, candidate);
             eligible += 1;
           }
         }
@@ -352,19 +560,38 @@ class CoreLLGuidanceInterpreter {
     if (this.tokenizer.isSpecial(token)) return false;
 
     const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    if (this.nonEosTokenCount() >= this.limits.maxTokens) return false;
+    if (this.outputByteLength() + bytes.length > this.limits.maxOutputBytes) {
+      return false;
+    }
     if (this.engine.kind === "regex") {
       const candidate = this.engine.compiled.advance(this.engine.state, bytes);
       return this.engine.compiled.viable(candidate);
     }
-    return this.engine.compiled.isUtf8PrefixViable(
-      appendBytes(this.engine.bytes, bytes),
+    return this.engine.compiled.viable(
+      this.engine.compiled.appendUtf8(this.engine.state, bytes),
     );
   }
 
   private accepting(): boolean {
     return this.engine.kind === "regex"
       ? this.engine.compiled.accepting(this.engine.state)
-      : this.engine.compiled.acceptsUtf8(this.engine.bytes);
+      : this.engine.compiled.accepting(this.engine.state);
+  }
+
+  private nonEosTokenCount(): number {
+    return this.generatedTokens;
+  }
+
+  private withinGenerationLimits(additionalBytes: number): boolean {
+    return (
+      this.generatedTokens < this.limits.maxTokens &&
+      this.generatedBytes + additionalBytes <= this.limits.maxOutputBytes
+    );
+  }
+
+  private outputByteLength(): number {
+    return this.generatedBytes;
   }
 
   private assertLive(): void {
@@ -372,7 +599,7 @@ class CoreLLGuidanceInterpreter {
   }
 }
 
-export function createEngine(compilers: EngineCompilers) {
+export function createEngine(compilers: EngineCompilers): EngineModule {
   class LLGuidanceInterpreter extends CoreLLGuidanceInterpreter {
     constructor(tokenizer: LLGuidanceTokenizer, config: unknown) {
       super(tokenizer, config, compilers);
@@ -460,6 +687,29 @@ function markerFromInterpreterConfig(config: unknown): Marker {
   const response = value.response_format ?? value.responseFormat;
   if (response !== undefined) return markerFromResponseFormat(response);
   throw new Error("interpreter config requires grammar or response_format");
+}
+
+function limitsFromInterpreterConfig(
+  config: unknown,
+): NormalizedGuidanceLimits {
+  const value = config as Record<string, unknown>;
+  const configured = value.limits ?? {};
+  if (configured === null || typeof configured !== "object") {
+    throw new TypeError("limits must be an object");
+  }
+  const source = configured as Record<string, unknown>;
+  const result = { ...DEFAULT_LIMITS };
+  for (const key of Object.keys(DEFAULT_LIMITS) as Array<
+    keyof GuidanceLimits
+  >) {
+    const raw = source[key];
+    if (raw === undefined) continue;
+    if (!Number.isSafeInteger(raw) || (raw as number) < 1) {
+      throw new RangeError(`limits.${key} must be a positive safe integer`);
+    }
+    result[key] = raw as number;
+  }
+  return result;
 }
 
 function markerFromResponseFormat(response: unknown): Marker {
@@ -570,7 +820,21 @@ function setMaskBit(mask: Uint32Array, token: number): void {
 function cloneMaskResult(result: MaskResult): MaskResult {
   return "mask" in result
     ? { mask: result.mask.slice(), vocabSize: result.vocabSize }
-    : { stop: true };
+    : { stop: true, reason: result.reason };
+}
+
+function singleAllowedToken(
+  mask: Uint32Array,
+  vocabSize: number,
+  eosToken: number,
+): number | null {
+  let found: number | null = null;
+  for (let token = 0; token < vocabSize; token += 1) {
+    if ((mask[token >>> 5] & (1 << (token & 31))) === 0) continue;
+    if (token === eosToken || found !== null) return null;
+    found = token;
+  }
+  return found;
 }
 
 function assertTokenId(id: number, vocabSize: number, name: string): void {

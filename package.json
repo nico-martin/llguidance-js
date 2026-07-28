@@ -24,6 +24,7 @@
     "size:js": "node scripts/report-bundle-sizes.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test",
+    "test:schema-suite": "node scripts/run-json-schema-suite.mjs",
     "publish": "node scripts/publish.mjs"
   },
   "devDependencies": {

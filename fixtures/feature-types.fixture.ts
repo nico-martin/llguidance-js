@@ -1,5 +1,6 @@
 import { loadJsonGuidance } from "../dist/json-schema.js";
 import { loadRegexGuidance } from "../dist/regex.js";
+import { loadGrammarGuidance } from "../dist/grammar.js";
 
 async function checkFeatureTypes() {
   const regex = await loadRegexGuidance();
@@ -30,6 +31,20 @@ async function checkFeatureTypes() {
   json.createInterpreter({
     tokenizer: jsonTokenizer,
     // @ts-expect-error The JSON bundle does not expose regex response formats.
+    response_format: { type: "regex", regex: "a" },
+  });
+
+  const grammar = await loadGrammarGuidance();
+  const grammarInterpreter = grammar.createInterpreter({
+    tokenizer: grammar.createTokenizer(),
+    grammar: 'start: "a"',
+  });
+  const capture: string | undefined =
+    grammarInterpreter.getCapture("start")?.value;
+  void capture;
+  // @ts-expect-error The grammar bundle requires a grammar string.
+  grammar.createInterpreter({
+    tokenizer: grammar.createTokenizer(),
     response_format: { type: "regex", regex: "a" },
   });
 }

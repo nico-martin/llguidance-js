@@ -33,6 +33,8 @@ const interpreter = runtime.createInterpreter({
 - Composition: `allOf`, `anyOf`, `oneOf`, and `not`.
 - Conditionals: `if`, `then`, and `else`.
 - References: `$defs` and local `$ref` values containing JSON Pointer fragments, including escaped pointer segments.
+- Draft-07 compatibility: `definitions`, legacy `dependencies`, tuple-form
+  `items`, and `additionalItems`.
 
 Instance numbers are compared as exact decimal values rather than rounded JavaScript `Number` values. Consequently, integer classification, bounds, `multipleOf`, `const`, `enum`, and `uniqueItems` preserve distinctions beyond JavaScript's safe-integer range.
 
@@ -111,7 +113,7 @@ Only root-level `x-guidance` is supported. Separators are literal strings; regex
 - `unevaluatedProperties` and `unevaluatedItems`
 - `$dynamicRef`, `$dynamicAnchor`, and other dynamic-reference behavior
 - External references
-- Draft-07 compatibility forms such as tuple-form `items`, `definitions`, and legacy `dependencies`
+- Other draft-specific behavior not listed in the supported assertions
 - Complete IRI, IDN, and email-standard conformance
 
 Unsupported assertion keywords fail during interpreter construction rather than being silently ignored.

@@ -13,6 +13,7 @@ const entries = [
   ["", "src/llguidance.ts", "src/llguidance.node.ts"],
   ["regex.", "src/regex.ts", "src/regex.ts"],
   ["json-schema.", "src/json-schema.ts", "src/json-schema.ts"],
+  ["grammar.", "src/grammar.ts", "src/grammar.ts"],
 ];
 const builds = entries.flatMap(([prefix, browserEntry, nodeEntry]) => [
   {

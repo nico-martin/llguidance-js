@@ -5,6 +5,7 @@ for (const file of [
   "browser.js",
   "regex.browser.js",
   "json-schema.browser.js",
+  "grammar.browser.js",
 ]) {
   const contents = await readFile(new URL(`../dist/${file}`, import.meta.url));
   console.log(

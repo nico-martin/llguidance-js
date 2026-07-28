@@ -6,8 +6,13 @@ const OP_END = 4;
 const OP_MATCH = 5;
 
 const NO_STATE = 0xffffffff;
-const MAX_REPEAT = 10_000;
-const MAX_STATES = 100_000;
+const DEFAULT_MAX_REPEAT = 10_000;
+const DEFAULT_MAX_STATES = 100_000;
+
+export interface RegexCompileOptions {
+  maxRegexRepeat?: number;
+  maxRegexStates?: number;
+}
 
 type Ast =
   | { kind: "empty" }
@@ -59,10 +64,6 @@ function emptySet(): Uint32Array {
   return new Uint32Array(8);
 }
 
-function fullSet(): Uint32Array {
-  return new Uint32Array(8).fill(0xffffffff);
-}
-
 function addByte(set: Uint32Array, byte: number): void {
   set[byte >>> 5] |= 1 << (byte & 31);
 }
@@ -88,6 +89,65 @@ function setHas(set: Uint32Array, byte: number): boolean {
 function setIsEmpty(set: Uint32Array): boolean {
   for (let i = 0; i < 8; i++) if (set[i] !== 0) return false;
   return true;
+}
+
+function byteRangeAst(first: number, last: number): Ast {
+  const set = emptySet();
+  addRange(set, first, last);
+  return { kind: "set", set };
+}
+
+function unicodeScalarAst(includeAscii = true): Ast {
+  const continuation = byteRangeAst(0x80, 0xbf);
+  const parts: Ast[] = [];
+  if (includeAscii) parts.push(byteRangeAst(0x00, 0x7f));
+  parts.push(
+    { kind: "concat", parts: [byteRangeAst(0xc2, 0xdf), continuation] },
+    {
+      kind: "concat",
+      parts: [byteRangeAst(0xe0, 0xe0), byteRangeAst(0xa0, 0xbf), continuation],
+    },
+    {
+      kind: "concat",
+      parts: [byteRangeAst(0xe1, 0xec), continuation, continuation],
+    },
+    {
+      kind: "concat",
+      parts: [byteRangeAst(0xed, 0xed), byteRangeAst(0x80, 0x9f), continuation],
+    },
+    {
+      kind: "concat",
+      parts: [byteRangeAst(0xee, 0xef), continuation, continuation],
+    },
+    {
+      kind: "concat",
+      parts: [
+        byteRangeAst(0xf0, 0xf0),
+        byteRangeAst(0x90, 0xbf),
+        continuation,
+        continuation,
+      ],
+    },
+    {
+      kind: "concat",
+      parts: [
+        byteRangeAst(0xf1, 0xf3),
+        continuation,
+        continuation,
+        continuation,
+      ],
+    },
+    {
+      kind: "concat",
+      parts: [
+        byteRangeAst(0xf4, 0xf4),
+        byteRangeAst(0x80, 0x8f),
+        continuation,
+        continuation,
+      ],
+    },
+  );
+  return { kind: "alt", parts };
 }
 
 function shorthandSet(code: string): Uint32Array | null {
@@ -124,8 +184,11 @@ class Parser {
   private index = 0;
   private readonly encoder = new TextEncoder();
 
-  constructor(source: string) {
+  private readonly maxRepeat: number;
+
+  constructor(source: string, maxRepeat: number) {
     this.source = source;
+    this.maxRepeat = maxRepeat;
   }
 
   parse(): Ast {
@@ -227,8 +290,8 @@ class Parser {
     }
     if (max !== null && max < min)
       this.fail("repetition upper bound is less than lower bound", open);
-    if (min > MAX_REPEAT || (max !== null && max > MAX_REPEAT)) {
-      this.fail(`repetition count exceeds ${MAX_REPEAT}`, open);
+    if (min > this.maxRepeat || (max !== null && max > this.maxRepeat)) {
+      this.fail(`repetition count exceeds ${this.maxRepeat}`, open);
     }
     return [min, max];
   }
@@ -242,8 +305,8 @@ class Parser {
       this.peek()! <= "9"
     ) {
       value = value * 10 + (this.source.charCodeAt(this.index++) - 0x30);
-      if (value > MAX_REPEAT)
-        this.fail(`repetition count exceeds ${MAX_REPEAT}`, start);
+      if (value > this.maxRepeat)
+        this.fail(`repetition count exceeds ${this.maxRepeat}`, start);
     }
     if (this.index === start) this.fail(message, errorIndex);
     return value;
@@ -253,10 +316,10 @@ class Parser {
     const char = this.peek();
     if (char === undefined) this.fail("expected an expression");
     if (char === "(") return this.parseGroup();
-    if (char === "[") return { kind: "set", set: this.parseClass() };
+    if (char === "[") return this.parseClass();
     if (char === ".") {
       this.index++;
-      return { kind: "set", set: fullSet() };
+      return unicodeScalarAst();
     }
     if (char === "^") {
       this.index++;
@@ -291,11 +354,12 @@ class Parser {
     return child;
   }
 
-  private parseClass(): Uint32Array {
+  private parseClass(): Ast {
     const open = this.index++;
     const negated = this.peek() === "^";
     if (negated) this.index++;
     const result = emptySet();
+    const unicode: Ast[] = [];
 
     while (this.peek() !== "]") {
       if (this.peek() === undefined)
@@ -308,36 +372,62 @@ class Parser {
       ) {
         const dash = this.index++;
         const last = this.parseClassAtom();
-        if (first.single === null || last.single === null) {
-          this.fail(
-            "character class ranges require single-byte endpoints",
-            dash,
-          );
+        if (
+          first.single === null ||
+          last.single === null ||
+          first.single > 0x7f ||
+          last.single > 0x7f
+        ) {
+          this.fail("character class ranges require ASCII endpoints", dash);
         }
         if (last.single < first.single)
           this.fail("character class range is out of order", dash);
         addRange(result, first.single, last.single);
       } else {
-        unionInto(result, first.set);
+        if (first.set !== null) unionInto(result, first.set);
+        else unicode.push(first.ast);
       }
     }
     this.index++;
-    return negated ? invertSet(result) : result;
+    if (negated) {
+      if (unicode.length !== 0) {
+        this.fail(
+          "negated classes with non-ASCII members are not supported",
+          open,
+        );
+      }
+      const ascii = emptySet();
+      for (let byte = 0; byte <= 0x7f; byte += 1) {
+        if (!setHas(result, byte)) addByte(ascii, byte);
+      }
+      return {
+        kind: "alt",
+        parts: [{ kind: "set", set: ascii }, unicodeScalarAst(false)],
+      };
+    }
+    const parts = unicode;
+    if (!setIsEmpty(result)) parts.unshift({ kind: "set", set: result });
+    return parts.length === 1 ? parts[0] : { kind: "alt", parts };
   }
 
-  private parseClassAtom(): { set: Uint32Array; single: number | null } {
+  private parseClassAtom(): {
+    ast: Ast;
+    set: Uint32Array | null;
+    single: number | null;
+  } {
     if (this.peek() === "\\") {
       const escaped = this.parseEscape(true);
-      if (escaped.set !== null)
-        return { set: escaped.set, single: escaped.single };
+      if (escaped.set !== null) return escaped;
       this.fail("invalid escape in character class");
     }
     const codePoint = this.readCodePoint();
-    if (codePoint > 0x7f)
-      this.fail("character classes and ranges are ASCII-only");
     const set = emptySet();
-    addByte(set, codePoint);
-    return { set, single: codePoint };
+    if (codePoint <= 0x7f) addByte(set, codePoint);
+    return {
+      ast: this.literalAst(codePoint),
+      set: codePoint <= 0x7f ? set : null,
+      single: codePoint,
+    };
   }
 
   private parseEscape(inClass: boolean): {
@@ -405,15 +495,12 @@ class Parser {
         value = code.codePointAt(0)!;
     }
 
-    if (inClass && value > 0x7f) {
-      this.fail("character classes and ranges are ASCII-only", slash);
-    }
     const set = emptySet();
-    if (value <= 0xff) addByte(set, value);
+    if (value <= 0x7f) addByte(set, value);
     return {
       ast: this.literalAst(value),
-      set: value <= 0xff ? set : null,
-      single: value <= 0xff ? value : null,
+      set: value <= 0x7f ? set : null,
+      single: value,
     };
   }
 
@@ -482,11 +569,16 @@ class Builder {
   readonly setIndex: number[] = [];
   readonly sets: Uint32Array[] = [];
   private readonly setIds = new Map<string, number>();
+  private readonly maxStates: number;
+
+  constructor(maxStates: number) {
+    this.maxStates = maxStates;
+  }
 
   emit(op: number, out1 = NO_STATE, out2 = NO_STATE, set = NO_STATE): number {
-    if (this.ops.length >= MAX_STATES) {
+    if (this.ops.length >= this.maxStates) {
       throw new SyntaxError(
-        `Regex compiles to more than ${MAX_STATES} NFA states`,
+        `Regex compiles to more than ${this.maxStates} NFA states`,
       );
     }
     const index = this.ops.length;
@@ -819,11 +911,16 @@ class CompiledRegexImpl implements CompiledRegex {
 }
 
 /** Compile a regex whose language is matched against the complete byte string. */
-export function compileRegex(source: string): CompiledRegex {
+export function compileRegex(
+  source: string,
+  options: RegexCompileOptions = {},
+): CompiledRegex {
   if (typeof source !== "string")
     throw new TypeError("regex source must be a string");
-  const ast = new Parser(source).parse();
-  const builder = new Builder();
+  const maxRepeat = options.maxRegexRepeat ?? DEFAULT_MAX_REPEAT;
+  const maxStates = options.maxRegexStates ?? DEFAULT_MAX_STATES;
+  const ast = new Parser(source, maxRepeat).parse();
+  const builder = new Builder(maxStates);
   const fragment = builder.compile(ast);
   const match = builder.emit(OP_MATCH);
   builder.patch(fragment.outs, match);

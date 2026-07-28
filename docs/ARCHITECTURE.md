@@ -31,7 +31,8 @@ See [REGEX_SUPPORT.md](REGEX_SUPPORT.md) for syntax details.
 
 ## JSON Schema Engine
 
-The JSON engine retains committed bytes. Candidate tokens are appended and analyzed as UTF-8 JSON prefixes.
+The JSON engine retains an analyzed UTF-8 prefix state. Candidate states built
+during masking are reused when the selected token is committed.
 
 Analysis has two responsibilities:
 
@@ -41,6 +42,12 @@ Analysis has two responsibilities:
 The schema validator keeps raw numeric spellings and normalizes them into exact decimal coefficient/exponent pairs for numeric assertions and equality.
 
 See [JSON_SCHEMA_PROFILE.md](JSON_SCHEMA_PROFILE.md) for the supported profile.
+
+## Grammar Engine
+
+The optional grammar engine parses its documented Lark subset into productions and incrementally evaluates them with an Earley-style chart. Literal and regex terminals reuse the regex NFA, while rule completions retain byte spans for captures.
+
+See [GRAMMAR_SUPPORT.md](GRAMMAR_SUPPORT.md) for syntax and capture semantics.
 
 ## Mask Cache
 
@@ -52,7 +59,8 @@ Returned `Uint32Array` masks are cloned, so callers can mutate them without corr
 
 - `src/engine/core.ts`: compiler-injected tokenizer, trie, interpreter, and marker factory
 - `src/engine/index.ts`: full engine wiring with both compilers
-- `src/engine/regex-only.ts` and `src/engine/json-only.ts`: static single-engine wiring
+- `src/engine/regex-only.ts`, `src/engine/json-only.ts`, and `src/engine/grammar-only.ts`: static feature wiring
+- `src/engine/grammar.ts`: Lark-subset parser and incremental CFG engine
 - `src/engine/regex.ts`: regex NFA
 - `src/engine/json-schema.ts`: JSON parser and schema validator
 - `src/runtime.ts`: convenience runtime and Python-style compatibility wrappers
@@ -60,12 +68,12 @@ Returned `Uint32Array` masks are cloned, so callers can mutate them without corr
 - `src/runtime-core.ts`: shared tokenizer conversion, cache, and handle creation
 - `src/tokenizer_bridge.ts`: extraction of raw token bytes from compatible tokenizer objects
 - `src/llguidance.ts`: cached runtime loader
-- `src/regex.ts` and `src/json-schema.ts`: cached feature loaders
+- `src/regex.ts`, `src/json-schema.ts`, and `src/grammar.ts`: cached feature loaders
 - `scripts/build-js.mjs`: full and feature browser and Node.js bundling
 
 ## Static Bundles
 
-The root entry injects both compilers into the engine factory. The `llguidance/regex` and `llguidance/json-schema` entries inject one compiler each and therefore have no static dependency on the excluded implementation. They do not use dynamic imports. Constructing an interpreter for an excluded response format throws a feature-unavailable error.
+The root entry injects the regex and JSON compilers. The `llguidance/regex`, `llguidance/json-schema`, and `llguidance/grammar` entries inject only their required compilers and therefore have no static dependency on excluded implementations; the grammar entry reuses the regex terminal compiler but not the JSON engine. They do not use dynamic imports. Constructing an interpreter for an excluded format throws explicitly.
 
 ## Lifecycle
 

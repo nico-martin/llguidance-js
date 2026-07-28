@@ -22,9 +22,21 @@ A successful commit invalidates the cache. EOS and stopped results are cached co
 
 ## JSON Masking
 
-JSON candidate checks currently analyze the committed prefix plus candidate token. Duplicate token byte sequences are evaluated once through trie terminals, but JSON does not yet carry a persistent incremental parser state through trie edges.
+JSON candidate checks analyze the committed prefix plus candidate token.
+Duplicate token byte sequences are evaluated once through trie terminals, and
+the analyzed state for an allowed token is reused if that token is committed.
+JSON does not yet advance a complete schema-aware parser state through every
+trie edge.
 
 Complex schemas and long generated prefixes can therefore cost more than regex masking. Conservative pruning can also leave additional candidates enabled until complete validation.
+
+## Safety Limits
+
+Interpreter configs accept finite generation and compile/parser limits. The
+defaults allow 100,000 generated tokens, 1 MiB of output, 100,000 regex NFA
+states, repetition counts up to 10,000, and schema/JSON nesting to depth 128.
+Use the `limits` config object to lower or raise individual bounds for a
+workload.
 
 ## Running The Benchmark
 
