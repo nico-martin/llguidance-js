@@ -31,8 +31,9 @@ See [REGEX_SUPPORT.md](REGEX_SUPPORT.md) for syntax details.
 
 ## JSON Schema Engine
 
-The JSON engine retains an analyzed UTF-8 prefix state. Candidate states built
-during masking are reused when the selected token is committed.
+The JSON engine retains an analyzed UTF-8 prefix state. Mask traversal does not
+retain every terminal branch. Commit validates the selected token once and
+reuses that transition to advance the stream.
 
 Analysis has two responsibilities:
 
@@ -54,6 +55,25 @@ See [GRAMMAR_SUPPORT.md](GRAMMAR_SUPPORT.md) for syntax and capture semantics.
 Each interpreter caches its mask for the current state. Repeated `computeMask()` calls avoid grammar recomputation.
 
 Returned `Uint32Array` masks are cloned, so callers can mutate them without corrupting the cache. A successful token commit invalidates the cache. Failed commits leave the interpreter state and cache unchanged.
+
+`computeMaskInto(target)` copies the cached mask into a caller-owned
+`Uint32Array` and returns that same array, avoiding a mask clone allocation.
+The target must have at least `ceil(vocabSize / 32)` words; extra words are
+cleared.
+
+## Compiled Program Cache
+
+Each `createEngine()` instance owns separate 64-entry LRU caches for compiled
+regex/Lark and JSON programs. Regex and Lark keys include source plus their
+compile limits, so interpreters sharing a compiled regex also share its learned
+lazy DFA transitions. JSON markers use their serialized schema as the key;
+direct response-format schema objects use object identity plus compile limits.
+Specialized feature bundles create separate engines and cannot share entries.
+
+A direct schema object is snapshotted on its first cache miss. Mutating that
+same object afterward does not affect cached interpreters or trigger a compile;
+after eviction, the next construction snapshots and compiles its current value.
+Callers should treat schema objects as immutable.
 
 ## Runtime Layers
 

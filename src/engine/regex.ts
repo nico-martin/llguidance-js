@@ -8,6 +8,7 @@ const OP_MATCH = 5;
 const NO_STATE = 0xffffffff;
 const DEFAULT_MAX_REPEAT = 10_000;
 const DEFAULT_MAX_STATES = 100_000;
+const MAX_CACHED_DFA_STATES = 4_096;
 
 export interface RegexCompileOptions {
   maxRegexRepeat?: number;
@@ -42,21 +43,33 @@ export interface CompiledRegex {
   accepting(state: RegexState): boolean;
 }
 
-type StateData = {
-  owner: CompiledRegexImpl;
+type StateData =
+  | { owner: CompiledRegexImpl; cached: true; id: number }
+  | {
+      owner: CompiledRegexImpl;
+      cached: false;
+      active: Uint32Array;
+      atStart: boolean;
+    };
+
+type StatePayload =
+  | { cached: true; id: number }
+  | { cached: false; active: Uint32Array; atStart: boolean };
+
+type DfaState = {
   active: Uint32Array;
   atStart: boolean;
+  state: RegexState;
+  transitions?: Uint32Array;
+  viable: boolean;
+  accepting: boolean | undefined;
 };
 
 const stateData = new WeakMap<object, StateData>();
 
-function makeState(
-  owner: CompiledRegexImpl,
-  active: Uint32Array,
-  atStart: boolean,
-): RegexState {
+function makeState(owner: CompiledRegexImpl, data: StatePayload): RegexState {
   const state = Object.freeze({}) as RegexState;
-  stateData.set(state, { owner, active, atStart });
+  stateData.set(state, { owner, ...data } as StateData);
   return state;
 }
 
@@ -705,6 +718,9 @@ class CompiledRegexImpl implements CompiledRegex {
   private readonly closureStack: Uint32Array;
   private readonly closureResult: Uint32Array;
   private readonly closureGeneration = new Uint32Array(1);
+  private readonly transitionSeeds: Uint32Array;
+  private readonly dfaStates: DfaState[] = [];
+  private readonly dfaBuckets = new Map<number, number[]>();
 
   constructor(source: string, builder: Builder, start: number) {
     this.source = source;
@@ -717,11 +733,10 @@ class CompiledRegexImpl implements CompiledRegex {
     this.closureMarks = new Uint32Array(this.ops.length);
     this.closureStack = new Uint32Array(this.ops.length);
     this.closureResult = new Uint32Array(this.ops.length);
-    this.initialState = makeState(
-      this,
-      this.closure(Uint32Array.of(start), true, false),
-      true,
-    );
+    this.transitionSeeds = new Uint32Array(this.ops.length);
+    const initialActive = this.closure(Uint32Array.of(start), true, false);
+    const initialId = this.intern(initialActive, true);
+    this.initialState = this.dfaStates[initialId].state;
     Object.freeze(this);
   }
 
@@ -731,31 +746,58 @@ class CompiledRegexImpl implements CompiledRegex {
       throw new TypeError("bytes must be a Uint8Array");
     if (bytes.length === 0) return state;
 
-    let active = data.active;
-    let atStart = data.atStart;
-    const seeds = new Uint32Array(this.ops.length);
+    let id = data.cached ? data.id : NO_STATE;
+    let active = data.cached ? this.dfaStates[data.id].active : data.active;
+    let atStart = data.cached ? this.dfaStates[data.id].atStart : data.atStart;
     for (const byte of bytes) {
+      if (id !== NO_STATE) {
+        const cached = this.dfaStates[id];
+        let transitions = cached.transitions;
+        if (transitions === undefined) {
+          transitions = new Uint32Array(256);
+          transitions.fill(NO_STATE);
+          cached.transitions = transitions;
+        }
+        const target = transitions[byte];
+        if (target !== NO_STATE) {
+          id = target;
+          active = this.dfaStates[target].active;
+          atStart = false;
+          if (active.length === 0) break;
+          continue;
+        }
+      }
+
       let count = 0;
-      for (const pc of active) {
+      for (let i = 0; i < active.length; i++) {
+        const pc = active[i];
         if (
           this.ops[pc] === OP_BYTE &&
           setHas(this.sets[this.setIndex[pc]], byte)
         ) {
-          seeds[count++] = this.out1[pc];
+          this.transitionSeeds[count++] = this.out1[pc];
         }
       }
       atStart = false;
       active =
         count === 0
           ? new Uint32Array(0)
-          : this.closure(seeds.subarray(0, count), false, false);
+          : this.closure(this.transitionSeeds.subarray(0, count), false, false);
+      const sourceId = id;
+      id = this.intern(active, false);
+      if (sourceId !== NO_STATE && id !== NO_STATE) {
+        this.dfaStates[sourceId].transitions![byte] = id;
+      }
       if (active.length === 0) break;
     }
-    return makeState(this, active, atStart);
+    return id === NO_STATE
+      ? makeState(this, { cached: false, active, atStart })
+      : this.dfaStates[id].state;
   }
 
   viable(state: RegexState): boolean {
     const data = this.getState(state);
+    if (data.cached) return this.dfaStates[data.id].viable;
     const context = data.atStart ? 1 : 0;
     for (const pc of data.active) {
       if (this.canReachMatch[(pc << 2) | context] !== 0) return true;
@@ -765,9 +807,14 @@ class CompiledRegexImpl implements CompiledRegex {
 
   accepting(state: RegexState): boolean {
     const data = this.getState(state);
-    const ended = this.closure(data.active, data.atStart, true);
-    for (const pc of ended) if (this.ops[pc] === OP_MATCH) return true;
-    return false;
+    if (!data.cached) {
+      return this.isAccepting(data.active, data.atStart);
+    }
+    const cached = this.dfaStates[data.id];
+    if (cached.accepting === undefined) {
+      cached.accepting = this.isAccepting(cached.active, cached.atStart);
+    }
+    return cached.accepting;
   }
 
   private getState(state: RegexState): StateData {
@@ -776,6 +823,58 @@ class CompiledRegexImpl implements CompiledRegex {
       throw new TypeError("state was not created by this compiled regex");
     }
     return data;
+  }
+
+  private intern(active: Uint32Array, atStart: boolean): number {
+    active.sort();
+    let hash = atStart ? 0x9e3779b9 : 0x811c9dc5;
+    for (let i = 0; i < active.length; i++) {
+      hash = Math.imul(hash ^ active[i], 0x01000193) >>> 0;
+    }
+    const bucket = this.dfaBuckets.get(hash);
+    if (bucket !== undefined) {
+      candidate: for (const id of bucket) {
+        const candidate = this.dfaStates[id];
+        if (
+          candidate.atStart !== atStart ||
+          candidate.active.length !== active.length
+        ) {
+          continue;
+        }
+        for (let i = 0; i < active.length; i++) {
+          if (candidate.active[i] !== active[i]) continue candidate;
+        }
+        return id;
+      }
+    }
+    if (this.dfaStates.length >= MAX_CACHED_DFA_STATES) return NO_STATE;
+
+    const id = this.dfaStates.length;
+    const state = makeState(this, { cached: true, id });
+    const context = atStart ? 1 : 0;
+    let viable = false;
+    for (let i = 0; i < active.length; i++) {
+      if (this.canReachMatch[(active[i] << 2) | context] !== 0) {
+        viable = true;
+        break;
+      }
+    }
+    this.dfaStates.push({
+      active,
+      atStart,
+      state,
+      viable,
+      accepting: undefined,
+    });
+    if (bucket === undefined) this.dfaBuckets.set(hash, [id]);
+    else bucket.push(id);
+    return id;
+  }
+
+  private isAccepting(active: Uint32Array, atStart: boolean): boolean {
+    const ended = this.closure(active, atStart, true);
+    for (const pc of ended) if (this.ops[pc] === OP_MATCH) return true;
+    return false;
   }
 
   private closure(

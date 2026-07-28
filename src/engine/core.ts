@@ -4,6 +4,7 @@ const LARK_UNSUPPORTED =
   "Lark grammars are not supported by the pure TypeScript core backend yet";
 const UPSTREAM_UNSUPPORTED =
   "Raw llguidance/guidance serialized grammars are not supported by the pure TypeScript core backend; use a marker produced by this backend";
+const MAX_COMPILED_PROGRAMS = 64;
 
 export interface TokenizerConfig {
   tokens?: Array<Uint8Array | readonly number[]>;
@@ -39,6 +40,7 @@ type Marker = {
   [MARKER_KEY]: typeof MARKER_VERSION;
   type: "regex" | "json_schema" | "lark";
   value: unknown;
+  cacheKey?: object | string;
 };
 
 interface RegexState {}
@@ -96,7 +98,9 @@ type Engine =
   | { kind: "json"; compiled: CompiledJsonSchema; state: JsonEngineState };
 
 type TokenTrieNode = {
-  readonly children: Map<number, TokenTrieNode>;
+  children: Map<number, TokenTrieNode> | null;
+  readonly childBytes: number[];
+  readonly childNodes: TokenTrieNode[];
   readonly terminalTokenIds: number[];
 };
 
@@ -129,6 +133,7 @@ export interface TokenizerHandle {
 
 export interface InterpreterHandle {
   computeMask(): MaskResult;
+  computeMaskInto(target: Uint32Array): MaskResult;
   commitToken(token: number): CommitResult;
   clone(): InterpreterHandle;
   rollback(count: number): void;
@@ -259,12 +264,15 @@ class CoreLLGuidanceInterpreter {
   private limits: NormalizedGuidanceLimits;
   private generatedTokens = 0;
   private generatedBytes = 0;
-  private jsonCandidates = new Map<number, JsonEngineState>();
+  private trieNodes: TokenTrieNode[] = [];
+  private trieStates: Array<RegexState | JsonEngineState> = [];
+  private pendingToken = -1;
+  private pendingState: RegexState | JsonEngineState | null = null;
 
   constructor(
     tokenizer: LLGuidanceTokenizer,
     config: unknown,
-    compilers: EngineCompilers,
+    programs: CompiledProgramCache,
   ) {
     if (!(tokenizer instanceof LLGuidanceTokenizer)) {
       throw new TypeError("tokenizer must be an LLGuidanceTokenizer");
@@ -273,46 +281,56 @@ class CoreLLGuidanceInterpreter {
     const marker = markerFromInterpreterConfig(config);
     this.limits = limitsFromInterpreterConfig(config);
     if (marker.type === "lark") {
-      if (compilers.compileLark === undefined)
+      if (programs.compilers.compileLark === undefined)
         throw new Error(LARK_UNSUPPORTED);
       if (typeof marker.value !== "string") {
         throw new TypeError("Lark grammar must be a string");
       }
-      const compiled = compilers.compileLark(marker.value, this.limits);
+      const compiled = programs.regex("lark", marker.value, this.limits);
       this.engine = { kind: "regex", compiled, state: compiled.initialState };
     } else if (marker.type === "regex") {
-      if (compilers.compileRegex === undefined) {
+      if (programs.compilers.compileRegex === undefined) {
         throw featureUnavailable("regex");
       }
       if (typeof marker.value !== "string") {
         throw new TypeError("regex grammar must be a string");
       }
-      const compiled = compilers.compileRegex(marker.value, this.limits);
+      const compiled = programs.regex("regex", marker.value, this.limits);
       this.engine = { kind: "regex", compiled, state: compiled.initialState };
     } else {
-      if (compilers.compileJsonSchema === undefined) {
+      if (programs.compilers.compileJsonSchema === undefined) {
         throw featureUnavailable("JSON Schema");
       }
-      const compiled = compilers.compileJsonSchema(marker.value, this.limits);
+      const compiled = programs.json(marker, this.limits);
       this.engine = { kind: "json", compiled, state: compiled.initialUtf8 };
     }
   }
 
   computeMask(): MaskResult {
     this.assertLive();
-    if (this.stopped) return { stop: true, reason: "accepted" };
     const vocabSize = this.tokenizer.vocabSize();
-    if (this.maskCache !== null) return cloneMaskResult(this.maskCache);
+    return cloneMaskResult(this.computeMaskCached(vocabSize));
+  }
 
-    this.jsonCandidates.clear();
-    const mask = new Uint32Array(Math.ceil(vocabSize / 32));
-    const eligible =
-      this.engine.kind === "regex"
-        ? this.computeRegexMask(mask)
-        : this.computeJsonMask(mask);
-    this.maskCache =
-      eligible === 0 ? { stop: true, reason: "dead_end" } : { mask, vocabSize };
-    return cloneMaskResult(this.maskCache);
+  computeMaskInto(target: Uint32Array): MaskResult {
+    this.assertLive();
+    if (!(target instanceof Uint32Array)) {
+      throw new TypeError("mask target must be a Uint32Array");
+    }
+    const vocabSize = this.tokenizer.vocabSize();
+    const words = Math.ceil(vocabSize / 32);
+    if (target.length < words) {
+      throw new RangeError(
+        `mask target needs at least ${words} words for vocabulary size ${vocabSize}`,
+      );
+    }
+    const result = this.computeMaskCached(vocabSize);
+    target.fill(0);
+    if ("mask" in result) {
+      target.set(result.mask);
+      return { mask: target, vocabSize };
+    }
+    return { stop: true, reason: result.reason };
   }
 
   commitToken(token: number): { stop: boolean; backtrack: 0; ffTokens: [] } {
@@ -331,6 +349,7 @@ class CoreLLGuidanceInterpreter {
       this.committedTokens.push(token);
       this.stopped = true;
       this.maskCache = null;
+      this.clearPendingTransition();
       return { stop: true, backtrack: 0, ffTokens: [] };
     }
 
@@ -346,20 +365,19 @@ class CoreLLGuidanceInterpreter {
       );
     }
     if (this.engine.kind === "regex") {
-      this.engine.state = this.engine.compiled.advance(
-        this.engine.state,
-        bytes,
-      );
+      if (this.pendingToken !== token)
+        throw new Error("missing regex transition");
+      this.engine.state = this.pendingState as RegexState;
     } else {
-      this.engine.state =
-        this.jsonCandidates.get(token) ??
-        this.engine.compiled.appendUtf8(this.engine.state, bytes);
+      if (this.pendingToken !== token)
+        throw new Error("missing JSON transition");
+      this.engine.state = this.pendingState as JsonEngineState;
     }
     this.committedTokens.push(token);
     this.generatedTokens += 1;
     this.generatedBytes += bytes.length;
     this.maskCache = null;
-    this.jsonCandidates.clear();
+    this.clearPendingTransition();
     return { stop: false, backtrack: 0, ffTokens: [] };
   }
 
@@ -377,7 +395,10 @@ class CoreLLGuidanceInterpreter {
     copy.limits = { ...this.limits };
     copy.generatedTokens = this.generatedTokens;
     copy.generatedBytes = this.generatedBytes;
-    copy.jsonCandidates = new Map();
+    copy.trieNodes = [];
+    copy.trieStates = [];
+    copy.pendingToken = -1;
+    copy.pendingState = null;
     return copy;
   }
 
@@ -447,7 +468,9 @@ class CoreLLGuidanceInterpreter {
 
   free(): void {
     this.maskCache = null;
-    this.jsonCandidates.clear();
+    this.trieNodes.length = 0;
+    this.trieStates.length = 0;
+    this.clearPendingTransition();
     this.freed = true;
   }
 
@@ -485,7 +508,7 @@ class CoreLLGuidanceInterpreter {
       }
     }
     this.maskCache = null;
-    this.jsonCandidates.clear();
+    this.clearPendingTransition();
   }
 
   private computeRegexMask(mask: Uint32Array): number {
@@ -498,64 +521,80 @@ class CoreLLGuidanceInterpreter {
       eligible += 1;
     }
 
-    const stack: Array<{ node: TokenTrieNode; state: RegexState }> = [
-      { node: data.trie, state },
-    ];
-    while (stack.length !== 0) {
-      const current = stack.pop()!;
-      for (const token of current.node.terminalTokenIds) {
+    const nodes = this.trieNodes;
+    const states = this.trieStates;
+    let stackLength = 1;
+    nodes[0] = data.trie;
+    states[0] = state;
+    while (stackLength !== 0) {
+      stackLength -= 1;
+      const node = nodes[stackLength];
+      const currentState = states[stackLength] as RegexState;
+      for (const token of node.terminalTokenIds) {
         if (token === data.eos || isSpecialToken(data, token)) continue;
         if (!this.withinGenerationLimits(data.tokenBytes[token].length))
           continue;
         setMaskBit(mask, token);
         eligible += 1;
       }
-      for (const [byte, child] of current.node.children) {
-        const candidate = compiled.advance(current.state, singleBytes[byte]);
-        if (compiled.viable(candidate))
-          stack.push({ node: child, state: candidate });
+      for (let index = 0; index < node.childNodes.length; index += 1) {
+        const child = node.childNodes[index];
+        const byte = node.childBytes[index];
+        const candidate = compiled.advance(currentState, singleBytes[byte]);
+        if (!compiled.viable(candidate)) continue;
+        nodes[stackLength] = child;
+        states[stackLength] = candidate;
+        stackLength += 1;
       }
     }
+    nodes.length = 0;
+    states.length = 0;
     return eligible;
   }
 
   private computeJsonMask(mask: Uint32Array): number {
     if (this.engine.kind !== "json") throw new Error("invalid JSON engine");
     const data = getTokenizerData(this.tokenizer);
+    const { compiled, state } = this.engine;
     let eligible = 0;
-    if (this.engine.compiled.accepting(this.engine.state)) {
+    if (compiled.accepting(state)) {
       setMaskBit(mask, data.eos);
       eligible += 1;
     }
 
-    const stack = [data.trie];
-    while (stack.length !== 0) {
-      const node = stack.pop()!;
-      const firstNormal = node.terminalTokenIds.find(
-        (token) => token !== data.eos && !isSpecialToken(data, token),
-      );
-      if (firstNormal !== undefined) {
-        const bytes = data.tokenBytes[firstNormal];
-        if (this.withinGenerationLimits(bytes.length)) {
-          const candidate = this.engine.compiled.appendUtf8(
-            this.engine.state,
-            bytes,
-          );
-          if (!this.engine.compiled.viable(candidate)) continue;
-          for (const token of node.terminalTokenIds) {
-            if (token === data.eos || isSpecialToken(data, token)) continue;
-            setMaskBit(mask, token);
-            this.jsonCandidates.set(token, candidate);
-            eligible += 1;
-          }
-        }
+    const nodes = this.trieNodes;
+    const states = this.trieStates;
+    let stackLength = 1;
+    nodes[0] = data.trie;
+    states[0] = state;
+    while (stackLength !== 0) {
+      stackLength -= 1;
+      const node = nodes[stackLength];
+      const currentState = states[stackLength] as JsonEngineState;
+      for (const token of node.terminalTokenIds) {
+        if (token === data.eos || isSpecialToken(data, token)) continue;
+        if (!this.withinGenerationLimits(data.tokenBytes[token].length))
+          continue;
+        setMaskBit(mask, token);
+        eligible += 1;
       }
-      for (const child of node.children.values()) stack.push(child);
+      for (let index = 0; index < node.childNodes.length; index += 1) {
+        const child = node.childNodes[index];
+        const byte = node.childBytes[index];
+        const candidate = compiled.appendUtf8(currentState, singleBytes[byte]);
+        if (!compiled.viable(candidate)) continue;
+        nodes[stackLength] = child;
+        states[stackLength] = candidate;
+        stackLength += 1;
+      }
     }
+    nodes.length = 0;
+    states.length = 0;
     return eligible;
   }
 
   private tokenAllowed(token: number): boolean {
+    this.clearPendingTransition();
     if (token === this.tokenizer.eosToken()) return this.accepting();
     if (this.tokenizer.isSpecial(token)) return false;
 
@@ -566,11 +605,34 @@ class CoreLLGuidanceInterpreter {
     }
     if (this.engine.kind === "regex") {
       const candidate = this.engine.compiled.advance(this.engine.state, bytes);
-      return this.engine.compiled.viable(candidate);
+      if (!this.engine.compiled.viable(candidate)) return false;
+      this.pendingToken = token;
+      this.pendingState = candidate;
+      return true;
     }
-    return this.engine.compiled.viable(
-      this.engine.compiled.appendUtf8(this.engine.state, bytes),
-    );
+    const candidate = this.engine.compiled.appendUtf8(this.engine.state, bytes);
+    if (!this.engine.compiled.viable(candidate)) return false;
+    this.pendingToken = token;
+    this.pendingState = candidate;
+    return true;
+  }
+
+  private computeMaskCached(vocabSize: number): MaskResult {
+    if (this.stopped) return { stop: true, reason: "accepted" };
+    if (this.maskCache !== null) return this.maskCache;
+    const mask = new Uint32Array(Math.ceil(vocabSize / 32));
+    const eligible =
+      this.engine.kind === "regex"
+        ? this.computeRegexMask(mask)
+        : this.computeJsonMask(mask);
+    this.maskCache =
+      eligible === 0 ? { stop: true, reason: "dead_end" } : { mask, vocabSize };
+    return this.maskCache;
+  }
+
+  private clearPendingTransition(): void {
+    this.pendingToken = -1;
+    this.pendingState = null;
   }
 
   private accepting(): boolean {
@@ -600,9 +662,10 @@ class CoreLLGuidanceInterpreter {
 }
 
 export function createEngine(compilers: EngineCompilers): EngineModule {
+  const programs = new CompiledProgramCache(compilers);
   class LLGuidanceInterpreter extends CoreLLGuidanceInterpreter {
     constructor(tokenizer: LLGuidanceTokenizer, config: unknown) {
-      super(tokenizer, config, compilers);
+      super(tokenizer, config, programs);
     }
   }
 
@@ -614,6 +677,84 @@ export function createEngine(compilers: EngineCompilers): EngineModule {
     grammarFromLark,
     grammarFromRegex,
   };
+}
+
+class BoundedCache<K, V> {
+  private readonly values = new Map<K, V>();
+
+  get(key: K): V | undefined {
+    const value = this.values.get(key);
+    if (value === undefined) return undefined;
+    this.values.delete(key);
+    this.values.set(key, value);
+    return value;
+  }
+
+  set(key: K, value: V): void {
+    if (this.values.size >= MAX_COMPILED_PROGRAMS) {
+      this.values.delete(this.values.keys().next().value!);
+    }
+    this.values.set(key, value);
+  }
+}
+
+class CompiledProgramCache {
+  readonly compilers: EngineCompilers;
+  private readonly regexPrograms = new BoundedCache<string, CompiledRegex>();
+  private readonly jsonPrograms = new BoundedCache<
+    string,
+    CompiledJsonSchema
+  >();
+  private readonly schemaIds = new WeakMap<object, number>();
+  private nextSchemaId = 0;
+
+  constructor(compilers: EngineCompilers) {
+    this.compilers = compilers;
+  }
+
+  regex(
+    kind: "regex" | "lark",
+    source: string,
+    limits: NormalizedGuidanceLimits,
+  ): CompiledRegex | CompiledLark {
+    const key = `${kind}\u0000${limits.maxRegexStates}\u0000${limits.maxRegexRepeat}\u0000${source}`;
+    const cached = this.regexPrograms.get(key);
+    if (cached !== undefined) return cached;
+    const compiled =
+      kind === "regex"
+        ? this.compilers.compileRegex!(source, limits)
+        : this.compilers.compileLark!(source, limits);
+    this.regexPrograms.set(key, compiled);
+    return compiled;
+  }
+
+  json(marker: Marker, limits: NormalizedGuidanceLimits): CompiledJsonSchema {
+    const schemaKey = marker.cacheKey ?? serializedSchemaKey(marker.value);
+    const identity =
+      typeof schemaKey === "string"
+        ? `serialized:${schemaKey}`
+        : `object:${this.schemaIdentity(schemaKey)}`;
+    const key = `${identity}\u0000${limits.maxSchemaDepth}\u0000${limits.maxJsonDepth}`;
+    const cached = this.jsonPrograms.get(key);
+    if (cached !== undefined) return cached;
+    const schema =
+      typeof schemaKey === "string"
+        ? marker.value
+        : snapshotSchema(marker.value);
+    const compiled = this.compilers.compileJsonSchema!(schema, limits);
+    this.jsonPrograms.set(key, compiled);
+    return compiled;
+  }
+
+  private schemaIdentity(schema: object): number {
+    let id = this.schemaIds.get(schema);
+    if (id === undefined) {
+      id = this.nextSchemaId;
+      this.nextSchemaId += 1;
+      this.schemaIds.set(schema, id);
+    }
+    return id;
+  }
 }
 
 export function grammarFrom(format: string, text: string): string {
@@ -725,9 +866,15 @@ function markerFromResponseFormat(response: unknown): Marker {
     case "json_schema":
       if (!("json_schema" in value))
         throw new TypeError("response_format.json_schema is required");
-      return makeMarker("json_schema", value.json_schema);
+      return {
+        ...makeMarker("json_schema", value.json_schema),
+        cacheKey: schemaIdentityKey(value.json_schema),
+      };
     case "json_object":
-      return makeMarker("json_schema", { type: "object" });
+      return {
+        ...makeMarker("json_schema", { type: "object" }),
+        cacheKey: '"json_object"',
+      };
     default:
       throw new Error(
         `unsupported response_format type: ${String(value.type)}`,
@@ -767,7 +914,29 @@ function parseMarker(
   ) {
     throw new Error(UPSTREAM_UNSUPPORTED);
   }
-  return parsed as Marker;
+  const marker = parsed as Marker;
+  if (marker.type === "json_schema") {
+    marker.cacheKey = serializedSchemaKey(marker.value);
+  }
+  return marker;
+}
+
+function schemaIdentityKey(schema: unknown): object | string {
+  return schema !== null && typeof schema === "object"
+    ? schema
+    : serializedSchemaKey(schema);
+}
+
+function serializedSchemaKey(schema: unknown): string {
+  const serialized = JSON.stringify(schema);
+  if (serialized === undefined) {
+    throw new TypeError("JSON schema is not serializable");
+  }
+  return serialized;
+}
+
+function snapshotSchema(schema: unknown): unknown {
+  return JSON.parse(serializedSchemaKey(schema)) as unknown;
 }
 
 function normalizeTokenBytes(
@@ -787,19 +956,35 @@ function normalizeTokenBytes(
 }
 
 function buildTokenTrie(tokens: readonly Uint8Array[]): TokenTrieNode {
-  const root: TokenTrieNode = { children: new Map(), terminalTokenIds: [] };
+  const makeNode = (): TokenTrieNode => ({
+    children: new Map(),
+    childBytes: [],
+    childNodes: [],
+    terminalTokenIds: [],
+  });
+  const root = makeNode();
   tokens.forEach((bytes, tokenId) => {
     let node = root;
     for (const byte of bytes) {
-      let child = node.children.get(byte);
+      let child = node.children!.get(byte);
       if (child === undefined) {
-        child = { children: new Map(), terminalTokenIds: [] };
-        node.children.set(byte, child);
+        child = makeNode();
+        node.children!.set(byte, child);
       }
       node = child;
     }
     node.terminalTokenIds.push(tokenId);
   });
+  const pending = [root];
+  while (pending.length !== 0) {
+    const node = pending.pop()!;
+    for (const [byte, child] of node.children!) {
+      node.childBytes.push(byte);
+      node.childNodes.push(child);
+      pending.push(child);
+    }
+    node.children = null;
+  }
   return root;
 }
 

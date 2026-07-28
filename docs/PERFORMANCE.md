@@ -18,15 +18,24 @@ The ratio is specific to the benchmark's shared-prefix vocabulary and is not a u
 
 Repeated `computeMask()` calls without a successful commit reuse an interpreter-local cached result and perform no grammar transitions. Returned masks are cloned to isolate callers from the cache.
 
+Callers that already own mask storage can use `computeMaskInto(target)` to
+reuse the same cached result without allocating a cloned `Uint32Array`.
+
 A successful commit invalidates the cache. EOS and stopped results are cached consistently with ordinary masks.
 
 ## JSON Masking
 
-JSON candidate checks analyze the committed prefix plus candidate token.
-Duplicate token byte sequences are evaluated once through trie terminals, and
-the analyzed state for an allowed token is reused if that token is committed.
-JSON does not yet advance a complete schema-aware parser state through every
-trie edge.
+JSON candidate checks advance incremental state through shared trie prefixes.
+Duplicate token byte sequences are evaluated once through trie terminals. The
+traversal uses reusable parallel node/state stacks and does not retain every
+allowed terminal state; commit computes only the selected token transition and
+reuses it for the state update.
+
+Compiled JSON programs also keep a bounded byte-transition cache shared by
+interpreters using that program. It caches at most 8,192 transitions by
+default, has a hard limit of 16,384, retains parent chains only for prefixes up
+to 128 bytes, and excludes complex-schema fallback states. This accelerates
+hot schemas and common output prefixes without allowing unbounded retention.
 
 Complex schemas and long generated prefixes can therefore cost more than regex masking. Conservative pruning can also leave additional candidates enabled until complete validation.
 
@@ -37,6 +46,14 @@ defaults allow 100,000 generated tokens, 1 MiB of output, 100,000 regex NFA
 states, repetition counts up to 10,000, and schema/JSON nesting to depth 128.
 Use the `limits` config object to lower or raise individual bounds for a
 workload.
+
+## Compiled Programs
+
+Each engine bundle keeps bounded 64-entry LRU caches for regex/Lark and JSON
+programs. Reusing a regex source and compile limits preserves learned lazy DFA
+transitions across interpreters. JSON grammar strings use serialized schema
+keys, while direct schema objects use identity and are snapshotted on a cache
+miss. Mutation is not observed while that identity remains cached.
 
 ## Running The Benchmark
 
@@ -52,12 +69,13 @@ For meaningful application benchmarks, use the actual model tokenizer and repres
 
 The full entry statically includes both engines and the compatibility runtime. `llguidance/regex` and `llguidance/json-schema` are static single-engine bundles; they do not defer code through dynamic imports.
 
-Browser bundle sizes measured with esbuild 0.25 on July 28, 2026:
+Minified browser bundle sizes measured with esbuild 0.25 on July 28, 2026:
 
-| Entry                    | Readable raw | Minified raw | Minified gzip |
-| ------------------------ | -----------: | -----------: | ------------: |
-| `llguidance`             |      121,940 |       65,674 |        19,158 |
-| `llguidance/regex`       |       48,192 |       25,796 |         8,362 |
-| `llguidance/json-schema` |       91,369 |       49,125 |        14,164 |
+| Entry                    | Minified raw | Minified gzip |
+| ------------------------ | -----------: | ------------: |
+| `llguidance`             |       92,545 |        25,996 |
+| `llguidance/regex`       |       34,612 |        10,708 |
+| `llguidance/json-schema` |       72,551 |        20,050 |
+| `llguidance/grammar`     |       43,361 |        13,241 |
 
 Source maps are excluded from these values. Run `pnpm run build:dist` followed by `pnpm run size:js` to measure the current minified browser outputs.

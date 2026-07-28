@@ -230,6 +230,10 @@ export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
       return this._interpreter.computeMask();
     }
 
+    computeMaskInto(target: Uint32Array): MaskResult {
+      return this._interpreter.computeMaskInto(target);
+    }
+
     commitToken(sampledToken: number) {
       return this._interpreter.commitToken(sampledToken);
     }

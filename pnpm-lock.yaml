@@ -15,6 +15,9 @@ importers:
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
+      llguidance-wasm:
+        specifier: npm:llguidance@0.1.7
+        version: llguidance@0.1.7
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
@@ -182,6 +185,9 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  llguidance@0.1.7:
+    resolution: {integrity: sha512-r55h3hDmkq313cFlqbKyx4IebqpreyrrnMJip7IR+ocwPGm7O6ZoDVCIAEg2wd6k7pQ5wWyuSzV9rSefqKVs6Q==}
+
   prettier@3.9.4:
     resolution: {integrity: sha512-yWG/o/4oJfo036EKAfK6ACAoDOfHeRHx4tuxkfBZiauURiaSmYwlpOr5LQqKtIkRD2z1PLteme2WoxEnj4tHTg==}
     engines: {node: '>=14'}
@@ -300,6 +306,8 @@ snapshots:
       '@esbuild/win32-arm64': 0.25.12
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
+
+  llguidance@0.1.7: {}
 
   prettier@3.9.4: {}
 

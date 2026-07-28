@@ -21,6 +21,8 @@
     "build:dist": "node scripts/build-dist.mjs",
     "dev": "node scripts/build-js.mjs --watch",
     "bench:mask": "node scripts/benchmark-mask.mjs",
+    "compare:browser:build": "node scripts/build-comparison-demo.mjs",
+    "compare:browser": "node scripts/serve-comparison-demo.mjs",
     "size:js": "node scripts/report-bundle-sizes.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
+    "llguidance-wasm": "npm:llguidance@0.1.7",
     "typescript": "^5.9.2"
   },
   "pnpm": {

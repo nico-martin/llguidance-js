@@ -25,6 +25,17 @@ export interface JsonUtf8PrefixState {
   readonly result: JsonPrefixResult;
 }
 
+export interface JsonParserInstrumentation {
+  incrementalBytes: number;
+  fallbackParses: number;
+  materializedBytes: number;
+  transitionCacheHits: number;
+  transitionCacheMisses: number;
+  transitionCacheEntries: number;
+  transitionCacheEvictions: number;
+  incrementalStatesCreated: number;
+}
+
 export interface CompiledJsonSchema {
   readonly initial: JsonPrefixState;
   readonly initialUtf8: JsonUtf8PrefixState;
@@ -42,11 +53,15 @@ export interface CompiledJsonSchema {
   viable(state: JsonUtf8PrefixState): boolean;
   accepting(state: JsonUtf8PrefixState): boolean;
   finish(state: JsonPrefixState): boolean;
+  /** A snapshot of parser work, intended for diagnostics and benchmarks. */
+  instrumentation(): Readonly<JsonParserInstrumentation>;
 }
 
 export interface JsonSchemaCompileOptions {
   maxSchemaDepth?: number;
   maxJsonDepth?: number;
+  maxTransitionCacheEntries?: number;
+  instrumentation?: JsonParserInstrumentation;
 }
 
 export class JsonSchemaCompileError extends Error {
@@ -1154,8 +1169,8 @@ function validateString(
   if (schema.maxLength !== undefined && length > (schema.maxLength as number))
     errors.push(`${path}: string is longer than maxLength ${schema.maxLength}`);
   if (
-    typeof schema.pattern === "string" &&
-    !unicodeRegExp(schema.pattern).test(value)
+    compiledSchemaState(schema).pattern !== undefined &&
+    !compiledSchemaState(schema).pattern!.test(value)
   )
     errors.push(
       `${path}: string does not match pattern ${JSON.stringify(schema.pattern)}`,
@@ -1261,9 +1276,16 @@ function validateObject(
     errors.push(
       `${path}: object has more than ${schema.maxProperties} properties`,
     );
-  for (const key of (schema.required as string[] | undefined) ?? [])
-    if (!byKey.has(key))
-      errors.push(`${path}: missing required property ${JSON.stringify(key)}`);
+  const compiled = compiledSchemaState(schema);
+  let seenRequired = 0n;
+  for (const key of byKey.keys())
+    seenRequired |= compiled.requiredBits.get(key) ?? 0n;
+  if (seenRequired !== compiled.requiredMask)
+    for (const key of compiled.required)
+      if (!byKey.has(key))
+        errors.push(
+          `${path}: missing required property ${JSON.stringify(key)}`,
+        );
 
   const propertyNames = schema.propertyNames as Schema | undefined;
   if (propertyNames !== undefined)
@@ -1278,16 +1300,15 @@ function validateObject(
       );
     }
 
-  const properties =
-    (schema.properties as Record<string, Schema> | undefined) ?? {};
-  const patterns = Object.entries(
-    (schema.patternProperties as Record<string, Schema> | undefined) ?? {},
-  ).map(([pattern, child]) => [unicodeRegExp(pattern), child] as const);
+  const properties = compiled.properties;
+  const patterns = compiled.patternProperties;
   for (const [key, child] of byKey) {
     let matched = false;
-    if (Object.prototype.hasOwnProperty.call(properties, key)) {
+    if (properties.has(key)) {
       matched = true;
-      errors.push(...validate(properties[key], child, propertyPath(path, key)));
+      errors.push(
+        ...validate(properties.get(key)!, child, propertyPath(path, key)),
+      );
     }
     for (const [pattern, patternSchema] of patterns)
       if (pattern.test(key)) {
@@ -1618,18 +1639,70 @@ function schemaTypes(schema: Schema): string[] | undefined {
   return (Array.isArray(schema.type) ? schema.type : [schema.type]) as string[];
 }
 
+const kindBits: Record<JsonNode["kind"], number> = {
+  null: 1 << 0,
+  boolean: 1 << 1,
+  number: 1 << 2,
+  string: 1 << 3,
+  array: 1 << 4,
+  object: 1 << 5,
+};
+const allKindBits = Object.values(kindBits).reduce(
+  (left, right) => left | right,
+);
+
+interface CompiledSchemaState {
+  readonly typeBits: number;
+  readonly properties: ReadonlyMap<string, Schema>;
+  readonly required: readonly string[];
+  readonly requiredBits: ReadonlyMap<string, bigint>;
+  readonly requiredMask: bigint;
+  readonly pattern?: RegExp;
+  readonly patternProperties: ReadonlyArray<readonly [RegExp, Schema]>;
+}
+
+const compiledSchemaStates = new WeakMap<object, CompiledSchemaState>();
+
+function compiledSchemaState(
+  schema: Record<string, unknown>,
+): CompiledSchemaState {
+  const cached = compiledSchemaStates.get(schema);
+  if (cached !== undefined) return cached;
+  const types = schemaTypes(schema);
+  let typeBits = types === undefined ? allKindBits : 0;
+  for (const type of types ?? [])
+    typeBits |=
+      type === "integer" ? kindBits.number : kindBits[type as JsonNode["kind"]];
+  const required = (schema.required as string[] | undefined) ?? [];
+  const requiredBits = new Map<string, bigint>();
+  required.forEach((key, index) => requiredBits.set(key, 1n << BigInt(index)));
+  const state: CompiledSchemaState = {
+    typeBits,
+    properties: new Map(
+      Object.entries(
+        (schema.properties as Record<string, Schema> | undefined) ?? {},
+      ),
+    ),
+    required,
+    requiredBits,
+    requiredMask: (1n << BigInt(required.length)) - 1n,
+    pattern:
+      typeof schema.pattern === "string"
+        ? unicodeRegExp(schema.pattern)
+        : undefined,
+    patternProperties: Object.entries(
+      (schema.patternProperties as Record<string, Schema> | undefined) ?? {},
+    ).map(([pattern, child]) => [unicodeRegExp(pattern), child] as const),
+  };
+  compiledSchemaStates.set(schema, state);
+  return state;
+}
+
 function setAllowsKind(schemas: SchemaSet, kind: JsonNode["kind"]): boolean {
   return schemas.every((schema) => {
     if (schema === false) return false;
-    const types = schemaTypes(schema);
-    return (
-      !types ||
-      types.some((type) =>
-        kind === "number"
-          ? type === "number" || type === "integer"
-          : type === kind,
-      )
-    );
+    if (schema === true) return true;
+    return (compiledSchemaState(schema).typeBits & kindBits[kind]) !== 0;
   });
 }
 
@@ -2339,6 +2412,1150 @@ function rawCodePointCanContinue(text: string): boolean {
   return inString && !escaped;
 }
 
+type IncrementalExpectation =
+  | "value"
+  | "arrayValueOrEnd"
+  | "arrayValue"
+  | "arrayAfterValue"
+  | "arraySeparator"
+  | "objectKeyOrEnd"
+  | "objectKey"
+  | "objectColon"
+  | "objectValue"
+  | "objectAfterValue"
+  | "objectSeparator"
+  | "done";
+
+interface IncrementalArrayFrame {
+  readonly kind: "array";
+  readonly schemas: SchemaSet;
+  readonly items: readonly JsonNode[];
+}
+
+interface IncrementalObjectFrame {
+  readonly kind: "object";
+  readonly schemas: SchemaSet;
+  readonly entries: ReadonlyArray<{ key: string; node: JsonNode }>;
+  readonly key?: string;
+}
+
+type IncrementalFrame = IncrementalArrayFrame | IncrementalObjectFrame;
+
+type NumberPhase =
+  | "minus"
+  | "zero"
+  | "integer"
+  | "dot"
+  | "fraction"
+  | "exponent"
+  | "exponentSign"
+  | "exponentDigits";
+
+type IncrementalLexeme =
+  | {
+      readonly kind: "string";
+      readonly value: string;
+      readonly key: boolean;
+      readonly escape: "none" | "slash" | "unicode";
+      readonly hexadecimal: string;
+    }
+  | {
+      readonly kind: "number";
+      readonly raw: string;
+      readonly phase: NumberPhase;
+      readonly schemas: SchemaSet;
+    }
+  | {
+      readonly kind: "literal";
+      readonly target: "true" | "false" | "null";
+      readonly offset: number;
+      readonly schemas: SchemaSet;
+    };
+
+interface Utf8Machine {
+  readonly expected: number;
+  readonly seen: number;
+  readonly codePoint: number;
+  readonly minimum: number;
+  readonly first: number;
+}
+
+interface IncrementalMachine {
+  readonly expectation: IncrementalExpectation;
+  readonly stack: readonly IncrementalFrame[];
+  readonly lexeme?: IncrementalLexeme;
+  readonly separatorOffset: number;
+  readonly root?: JsonNode;
+  readonly invalid?: string;
+  readonly started: boolean;
+  readonly utf8: Utf8Machine;
+}
+
+interface InternalUtf8State extends JsonUtf8PrefixState {
+  readonly owner?: object;
+  readonly machine?: IncrementalMachine;
+  readonly parent?: InternalUtf8State;
+  readonly byte?: number;
+  readonly length: number;
+}
+
+const DEFAULT_TRANSITION_CACHE_ENTRIES = 8_192;
+const MAX_TRANSITION_CACHE_ENTRIES = 16_384;
+// Cached children retain their immutable prefix chain for `state.bytes`.
+const MAX_CACHED_STATE_BYTES = 128;
+
+const emptyUtf8Machine: Utf8Machine = {
+  expected: 0,
+  seen: 0,
+  codePoint: 0,
+  minimum: 0,
+  first: 0,
+};
+
+function isJsonWhitespace(character: string): boolean {
+  return (
+    character === " " ||
+    character === "\t" ||
+    character === "\n" ||
+    character === "\r"
+  );
+}
+
+function schemaSupportsIncrementalState(
+  schema: Schema,
+  seen = new Set<object>(),
+): boolean {
+  if (typeof schema === "boolean") return true;
+  if (seen.has(schema)) return true;
+  seen.add(schema);
+  for (const keyword of [
+    "$ref",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "pattern",
+    "format",
+    "patternProperties",
+    "propertyNames",
+    "dependentRequired",
+    "dependentSchemas",
+    "dependencies",
+    "contains",
+    "uniqueItems",
+  ])
+    if (schema[keyword] !== undefined) return false;
+  const children: unknown[] = [];
+  if (schema.properties !== undefined)
+    children.push(
+      ...Object.values(schema.properties as Record<string, Schema>),
+    );
+  if (Array.isArray(schema.items)) children.push(...schema.items);
+  else if (schema.items !== undefined) children.push(schema.items);
+  if (Array.isArray(schema.prefixItems)) children.push(...schema.prefixItems);
+  if (schema.additionalItems !== undefined)
+    children.push(schema.additionalItems);
+  if (schema.additionalProperties !== undefined)
+    children.push(schema.additionalProperties);
+  return children.every((child) =>
+    schemaSupportsIncrementalState(child as Schema, seen),
+  );
+}
+
+function incrementalPropertyNameSchemas(schemas: SchemaSet): SchemaSet {
+  const result: SchemaSet = [];
+  for (const schema of schemas)
+    if (typeof schema !== "boolean" && schema.propertyNames !== undefined)
+      result.push(schema.propertyNames as Schema);
+  return result.length === 0 ? [true] : result;
+}
+
+function incrementalAvailableProperties(
+  schemas: SchemaSet,
+  entries: ReadonlyArray<{ key: string; node: JsonNode }>,
+): string[] {
+  const used = new Set(entries.map(({ key }) => key));
+  const result = new Set<string>();
+  for (const schema of schemas) {
+    if (typeof schema === "boolean") continue;
+    for (const key of compiledSchemaState(schema).properties.keys())
+      if (!used.has(key)) result.add(key);
+  }
+  return [...result];
+}
+
+function incrementalAdditionalPropertiesAllowed(schemas: SchemaSet): boolean {
+  return schemas.every(
+    (schema) =>
+      typeof schema === "boolean" || schema.additionalProperties !== false,
+  );
+}
+
+function incrementalPropertyPrefixPossible(
+  schemas: SchemaSet,
+  entries: ReadonlyArray<{ key: string; node: JsonNode }>,
+  prefix: string,
+): boolean {
+  const names = incrementalPropertyNameSchemas(schemas);
+  const finite = finiteSchemaValues(names);
+  if (
+    finite !== undefined &&
+    !finite.some(
+      (candidate) =>
+        typeof candidate === "string" && candidate.startsWith(prefix),
+    )
+  )
+    return false;
+  for (const schema of names)
+    if (
+      typeof schema !== "boolean" &&
+      schema.maxLength !== undefined &&
+      Array.from(prefix).length > (schema.maxLength as number)
+    )
+      return false;
+  return (
+    incrementalAdditionalPropertiesAllowed(schemas) ||
+    incrementalAvailableProperties(schemas, entries).some((name) =>
+      name.startsWith(prefix),
+    )
+  );
+}
+
+function incrementalPropertySchemas(
+  schemas: SchemaSet,
+  key: string,
+): SchemaSet | null {
+  const result: SchemaSet = [];
+  for (const schema of schemas) {
+    if (typeof schema === "boolean") continue;
+    const properties = compiledSchemaState(schema).properties;
+    const child = properties.has(key)
+      ? properties.get(key)
+      : (schema.additionalProperties as Schema | undefined);
+    if (child === false) return null;
+    if (child !== undefined && child !== true) result.push(child);
+  }
+  return result.length === 0 ? [true] : result;
+}
+
+function incrementalArrayItemSchemas(
+  schemas: SchemaSet,
+  index: number,
+): SchemaSet | null {
+  const result: SchemaSet = [];
+  for (const schema of schemas) {
+    if (typeof schema === "boolean") continue;
+    const legacyTuple = Array.isArray(schema.items)
+      ? (schema.items as Schema[])
+      : undefined;
+    const prefix =
+      (schema.prefixItems as Schema[] | undefined) ?? legacyTuple ?? [];
+    const child =
+      index < prefix.length
+        ? prefix[index]
+        : legacyTuple
+          ? schema.additionalItems
+          : schema.items;
+    if (child === false) return null;
+    if (child !== undefined && child !== true) result.push(child as Schema);
+  }
+  return result.length === 0 ? [true] : result;
+}
+
+function incrementalArrayCanAdd(schemas: SchemaSet, count: number): boolean {
+  return (
+    schemas.every(
+      (schema) =>
+        typeof schema === "boolean" ||
+        schema.maxItems === undefined ||
+        count < (schema.maxItems as number),
+    ) && incrementalArrayItemSchemas(schemas, count) !== null
+  );
+}
+
+function incrementalObjectCanAdd(
+  schemas: SchemaSet,
+  entries: ReadonlyArray<{ key: string; node: JsonNode }>,
+): boolean {
+  if (
+    schemas.some(
+      (schema) =>
+        typeof schema !== "boolean" &&
+        schema.maxProperties !== undefined &&
+        entries.length >= (schema.maxProperties as number),
+    )
+  )
+    return false;
+  return (
+    incrementalAdditionalPropertiesAllowed(schemas) ||
+    incrementalAvailableProperties(schemas, entries).length !== 0
+  );
+}
+
+function incrementalNodeForObject(
+  entries: ReadonlyArray<{ key: string; node: JsonNode }>,
+): Extract<JsonNode, { kind: "object" }> {
+  const value: Record<string, unknown> = {};
+  for (const entry of entries)
+    Object.defineProperty(value, entry.key, {
+      value: entry.node.value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  return { kind: "object", value, entries: [...entries] };
+}
+
+function incrementalStringPrefixViable(
+  value: string,
+  schemas: SchemaSet,
+): boolean {
+  const length = Array.from(value).length;
+  if (
+    schemas.some(
+      (schema) =>
+        typeof schema !== "boolean" &&
+        schema.maxLength !== undefined &&
+        length > (schema.maxLength as number),
+    )
+  )
+    return false;
+  const finite = finiteSchemaValues(schemas);
+  return (
+    finite === undefined ||
+    finite.some(
+      (candidate) =>
+        typeof candidate === "string" && candidate.startsWith(value),
+    )
+  );
+}
+
+function incrementalCurrentValueSchemas(
+  machine: IncrementalMachine,
+  rootSchemas: SchemaSet,
+): SchemaSet {
+  if (machine.stack.length === 0) return rootSchemas;
+  const frame = machine.stack[machine.stack.length - 1];
+  return frame.kind === "array"
+    ? incrementalArrayItemSchemas(frame.schemas, frame.items.length)!
+    : incrementalPropertySchemas(frame.schemas, frame.key!)!;
+}
+
+function numberPhaseAccepting(phase: NumberPhase): boolean {
+  return (
+    phase === "zero" ||
+    phase === "integer" ||
+    phase === "fraction" ||
+    phase === "exponentDigits"
+  );
+}
+
+function incrementalResult(
+  machine: IncrementalMachine,
+  rootSchemas: SchemaSet,
+  references: Map<string, Schema>,
+  guidance: Guidance,
+  maxDepth: number,
+): JsonPrefixResult {
+  if (machine.invalid !== undefined)
+    return {
+      status: "invalid",
+      viable: false,
+      accepted: false,
+      errors: [machine.invalid],
+    };
+  if (machine.utf8.expected !== 0) {
+    const utf8 = machine.utf8;
+    let completed = utf8.codePoint;
+    for (let seen = utf8.seen; seen < utf8.expected; seen += 1) completed <<= 6;
+    if (completed < utf8.minimum) completed = utf8.minimum;
+    if (completed >= 0xd800 && completed <= 0xdfff) completed = 0xe000;
+    const base = { ...machine, utf8: emptyUtf8Machine };
+    const completionViable =
+      completed <= 0x10ffff &&
+      incrementalResult(
+        feedIncrementalCharacter(
+          base,
+          String.fromCodePoint(completed),
+          rootSchemas,
+          references,
+          guidance,
+          maxDepth,
+        ),
+        rootSchemas,
+        references,
+        guidance,
+        maxDepth,
+      ).viable;
+    const rawStringCanContinue =
+      machine.lexeme?.kind === "string" &&
+      machine.lexeme.escape === "none" &&
+      incrementalResult(base, rootSchemas, references, guidance, maxDepth)
+        .viable;
+    const viable = completionViable || rawStringCanContinue;
+    return {
+      status: viable ? "incomplete" : "invalid",
+      viable,
+      accepted: false,
+      errors: viable
+        ? []
+        : ["Partial UTF-8 code point cannot occur at this JSON position"],
+    };
+  }
+  if (machine.expectation === "done" && machine.root !== undefined)
+    return {
+      status: "complete",
+      viable: true,
+      accepted: true,
+      value: machine.root.value,
+      errors: [],
+    };
+  if (machine.expectation === "arrayValue") {
+    const frame = machine.stack[machine.stack.length - 1];
+    if (
+      frame?.kind !== "array" ||
+      !incrementalArrayCanAdd(frame.schemas, frame.items.length)
+    )
+      return {
+        status: "incomplete",
+        viable: false,
+        accepted: false,
+        errors: [],
+      };
+  }
+  if (machine.expectation === "objectKey") {
+    const frame = machine.stack[machine.stack.length - 1];
+    if (
+      frame?.kind !== "object" ||
+      !incrementalObjectCanAdd(frame.schemas, frame.entries)
+    )
+      return {
+        status: "incomplete",
+        viable: false,
+        accepted: false,
+        errors: [],
+      };
+  }
+  if (machine.lexeme?.kind === "number" && machine.stack.length === 0) {
+    if (!numberPhaseAccepting(machine.lexeme.phase))
+      return {
+        status: "incomplete",
+        viable: true,
+        accepted: false,
+        errors: [],
+      };
+    const node: JsonNode = {
+      kind: "number",
+      value: Number(machine.lexeme.raw),
+      raw: machine.lexeme.raw,
+    };
+    const errors = machine.lexeme.schemas.flatMap((schema) =>
+      validateDocument(schema, node, references),
+    );
+    return {
+      status: "complete",
+      viable: true,
+      accepted: errors.length === 0,
+      value: node.value,
+      errors,
+    };
+  }
+  return { status: "incomplete", viable: true, accepted: false, errors: [] };
+}
+
+function replaceTopFrame(
+  machine: IncrementalMachine,
+  frame: IncrementalFrame,
+): IncrementalMachine {
+  return { ...machine, stack: [...machine.stack.slice(0, -1), frame] };
+}
+
+function invalidateIncremental(
+  machine: IncrementalMachine,
+  message: string,
+): IncrementalMachine {
+  return { ...machine, invalid: message, lexeme: undefined };
+}
+
+function finishIncrementalValue(
+  machine: IncrementalMachine,
+  node: JsonNode,
+  schemas: SchemaSet,
+  references: Map<string, Schema>,
+): IncrementalMachine {
+  if (!validForSet(schemas, node, references))
+    return invalidateIncremental(machine, "JSON value does not satisfy schema");
+  if (machine.stack.length === 0)
+    return { ...machine, expectation: "done", lexeme: undefined, root: node };
+  const frame = machine.stack[machine.stack.length - 1];
+  if (frame.kind === "array") {
+    const next: IncrementalArrayFrame = {
+      ...frame,
+      items: [...frame.items, node],
+    };
+    return {
+      ...replaceTopFrame(machine, next),
+      expectation: "arrayAfterValue",
+      lexeme: undefined,
+    };
+  }
+  if (frame.key === undefined)
+    return invalidateIncremental(machine, "Missing object property name");
+  const next: IncrementalObjectFrame = {
+    kind: "object",
+    schemas: frame.schemas,
+    entries: [...frame.entries, { key: frame.key, node }],
+  };
+  return {
+    ...replaceTopFrame(machine, next),
+    expectation: "objectAfterValue",
+    lexeme: undefined,
+  };
+}
+
+function beginIncrementalValue(
+  machine: IncrementalMachine,
+  character: string,
+  schemas: SchemaSet,
+  references: Map<string, Schema>,
+  maxDepth: number,
+): IncrementalMachine {
+  const kind =
+    character === '"'
+      ? "string"
+      : character === "["
+        ? "array"
+        : character === "{"
+          ? "object"
+          : character === "t" || character === "f"
+            ? "boolean"
+            : character === "n"
+              ? "null"
+              : character === "-" || (character >= "0" && character <= "9")
+                ? "number"
+                : undefined;
+  if (kind === undefined || !setCanStart(schemas, kind))
+    return invalidateIncremental(machine, "Unexpected JSON value byte");
+  if (
+    (kind === "array" || kind === "object") &&
+    machine.stack.length > maxDepth
+  )
+    return invalidateIncremental(
+      machine,
+      `JSON nesting exceeds maxJsonDepth (${maxDepth})`,
+    );
+  if (kind === "string")
+    return {
+      ...machine,
+      lexeme: {
+        kind: "string",
+        value: "",
+        key: false,
+        escape: "none",
+        hexadecimal: "",
+      },
+    };
+  if (kind === "array")
+    return {
+      ...machine,
+      stack: [...machine.stack, { kind: "array", schemas, items: [] }],
+      expectation: "arrayValueOrEnd",
+    };
+  if (kind === "object")
+    return {
+      ...machine,
+      stack: [...machine.stack, { kind: "object", schemas, entries: [] }],
+      expectation: "objectKeyOrEnd",
+    };
+  if (kind === "boolean" || kind === "null") {
+    const target =
+      character === "t" ? "true" : character === "f" ? "false" : "null";
+    return {
+      ...machine,
+      lexeme: { kind: "literal", target, offset: 1, schemas },
+    };
+  }
+  const phase: NumberPhase =
+    character === "-" ? "minus" : character === "0" ? "zero" : "integer";
+  return {
+    ...machine,
+    lexeme: { kind: "number", raw: character, phase, schemas },
+  };
+}
+
+function feedIncrementalCharacter(
+  machine: IncrementalMachine,
+  character: string,
+  rootSchemas: SchemaSet,
+  references: Map<string, Schema>,
+  guidance: Guidance,
+  maxDepth: number,
+): IncrementalMachine {
+  if (machine.invalid !== undefined) return machine;
+  const lexeme = machine.lexeme;
+  if (lexeme?.kind === "literal") {
+    if (character !== lexeme.target[lexeme.offset])
+      return invalidateIncremental(machine, `Invalid ${lexeme.target} literal`);
+    const offset = lexeme.offset + 1;
+    if (offset !== lexeme.target.length)
+      return { ...machine, lexeme: { ...lexeme, offset } };
+    const node: JsonNode =
+      lexeme.target === "null"
+        ? { kind: "null", value: null }
+        : { kind: "boolean", value: lexeme.target === "true" };
+    return finishIncrementalValue(machine, node, lexeme.schemas, references);
+  }
+  if (lexeme?.kind === "string") {
+    if (lexeme.escape === "unicode") {
+      if (!/[0-9a-fA-F]/.test(character))
+        return invalidateIncremental(machine, "Invalid Unicode escape");
+      const hexadecimal = lexeme.hexadecimal + character;
+      if (hexadecimal.length < 4)
+        return { ...machine, lexeme: { ...lexeme, hexadecimal } };
+      const value =
+        lexeme.value + String.fromCharCode(Number.parseInt(hexadecimal, 16));
+      return {
+        ...machine,
+        lexeme: { ...lexeme, value, escape: "none", hexadecimal: "" },
+      };
+    }
+    if (lexeme.escape === "slash") {
+      const simple: Record<string, string> = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      };
+      if (character === "u")
+        return {
+          ...machine,
+          lexeme: { ...lexeme, escape: "unicode", hexadecimal: "" },
+        };
+      if (!Object.prototype.hasOwnProperty.call(simple, character))
+        return invalidateIncremental(machine, "Invalid string escape");
+      const value = lexeme.value + simple[character];
+      return { ...machine, lexeme: { ...lexeme, value, escape: "none" } };
+    }
+    if (character === "\\")
+      return { ...machine, lexeme: { ...lexeme, escape: "slash" } };
+    if (character === '"') {
+      if (lexeme.key) {
+        const frame = machine.stack[machine.stack.length - 1];
+        if (frame?.kind !== "object")
+          return invalidateIncremental(machine, "Property outside object");
+        if (
+          frame.entries.some(({ key }) => key === lexeme.value) ||
+          !validForSet(
+            incrementalPropertyNameSchemas(frame.schemas),
+            { kind: "string", value: lexeme.value },
+            references,
+          ) ||
+          incrementalPropertySchemas(frame.schemas, lexeme.value) === null
+        )
+          return invalidateIncremental(machine, "Invalid object property name");
+        return {
+          ...replaceTopFrame(machine, { ...frame, key: lexeme.value }),
+          expectation: "objectColon",
+          lexeme: undefined,
+          separatorOffset: 0,
+        };
+      }
+      return finishIncrementalValue(
+        machine,
+        { kind: "string", value: lexeme.value },
+        incrementalCurrentValueSchemas(machine, rootSchemas),
+        references,
+      );
+    }
+    if (character.charCodeAt(0) < 0x20)
+      return invalidateIncremental(
+        machine,
+        "Unescaped control character in string",
+      );
+    const value = lexeme.value + character;
+    const schemas = lexeme.key
+      ? incrementalPropertyNameSchemas(
+          (machine.stack[machine.stack.length - 1] as IncrementalObjectFrame)
+            .schemas,
+        )
+      : incrementalCurrentValueSchemas(machine, rootSchemas);
+    if (
+      lexeme.key
+        ? !incrementalPropertyPrefixPossible(
+            (machine.stack[machine.stack.length - 1] as IncrementalObjectFrame)
+              .schemas,
+            (machine.stack[machine.stack.length - 1] as IncrementalObjectFrame)
+              .entries,
+            value,
+          )
+        : !incrementalStringPrefixViable(value, schemas)
+    )
+      return invalidateIncremental(
+        machine,
+        "String prefix cannot satisfy schema",
+      );
+    return { ...machine, lexeme: { ...lexeme, value } };
+  }
+  if (lexeme?.kind === "number") {
+    const digit = character >= "0" && character <= "9";
+    let phase: NumberPhase | undefined;
+    if (lexeme.phase === "minus")
+      phase = digit ? (character === "0" ? "zero" : "integer") : undefined;
+    else if (lexeme.phase === "zero")
+      phase =
+        character === "."
+          ? "dot"
+          : character === "e" || character === "E"
+            ? "exponent"
+            : undefined;
+    else if (lexeme.phase === "integer")
+      phase = digit
+        ? "integer"
+        : character === "."
+          ? "dot"
+          : character === "e" || character === "E"
+            ? "exponent"
+            : undefined;
+    else if (lexeme.phase === "dot") phase = digit ? "fraction" : undefined;
+    else if (lexeme.phase === "fraction")
+      phase = digit
+        ? "fraction"
+        : character === "e" || character === "E"
+          ? "exponent"
+          : undefined;
+    else if (lexeme.phase === "exponent")
+      phase =
+        character === "+" || character === "-"
+          ? "exponentSign"
+          : digit
+            ? "exponentDigits"
+            : undefined;
+    else if (lexeme.phase === "exponentSign")
+      phase = digit ? "exponentDigits" : undefined;
+    else phase = digit ? "exponentDigits" : undefined;
+    if (phase !== undefined)
+      return {
+        ...machine,
+        lexeme: { ...lexeme, raw: lexeme.raw + character, phase },
+      };
+    if (!numberPhaseAccepting(lexeme.phase))
+      return invalidateIncremental(machine, "Incomplete number");
+    const node: JsonNode = {
+      kind: "number",
+      value: Number(lexeme.raw),
+      raw: lexeme.raw,
+    };
+    const finished = finishIncrementalValue(
+      machine,
+      node,
+      lexeme.schemas,
+      references,
+    );
+    if (finished.invalid !== undefined) return finished;
+    return feedIncrementalCharacter(
+      finished,
+      character,
+      rootSchemas,
+      references,
+      guidance,
+      maxDepth,
+    );
+  }
+
+  const whitespace = guidance.whitespaceFlexible && isJsonWhitespace(character);
+  if (machine.expectation === "done")
+    return invalidateIncremental(
+      machine,
+      "Unexpected content after the JSON document",
+    );
+  if (whitespace) {
+    if (!machine.started)
+      return invalidateIncremental(
+        machine,
+        "Initial JSON whitespace is not allowed",
+      );
+    if (
+      machine.expectation === "objectColon" &&
+      character === guidance.keySeparator[machine.separatorOffset]
+    ) {
+      const offset = machine.separatorOffset + 1;
+      return offset === guidance.keySeparator.length
+        ? { ...machine, expectation: "objectValue", separatorOffset: 0 }
+        : { ...machine, separatorOffset: offset };
+    }
+    if (machine.expectation === "objectColon" && machine.separatorOffset > 0)
+      return invalidateIncremental(machine, "Invalid object key separator");
+    if (
+      (machine.expectation === "arraySeparator" ||
+        machine.expectation === "objectSeparator") &&
+      character === guidance.itemSeparator[machine.separatorOffset]
+    ) {
+      const offset = machine.separatorOffset + 1;
+      if (offset !== guidance.itemSeparator.length)
+        return { ...machine, separatorOffset: offset };
+      return {
+        ...machine,
+        expectation:
+          machine.expectation === "arraySeparator" ? "arrayValue" : "objectKey",
+        separatorOffset: 0,
+      };
+    }
+    if (
+      (machine.expectation === "arraySeparator" ||
+        machine.expectation === "objectSeparator") &&
+      machine.separatorOffset > 0
+    )
+      return invalidateIncremental(machine, "Invalid JSON item separator");
+    return machine;
+  }
+  machine = { ...machine, started: true };
+  if (
+    machine.expectation === "arrayValueOrEnd" ||
+    machine.expectation === "arrayValue"
+  ) {
+    const frame = machine.stack[
+      machine.stack.length - 1
+    ] as IncrementalArrayFrame;
+    if (character === "]" && machine.expectation === "arrayValueOrEnd") {
+      const node: JsonNode = { kind: "array", value: [], items: [] };
+      const parent = { ...machine, stack: machine.stack.slice(0, -1) };
+      return finishIncrementalValue(parent, node, frame.schemas, references);
+    }
+    const schemas = incrementalArrayItemSchemas(
+      frame.schemas,
+      frame.items.length,
+    );
+    if (
+      schemas === null ||
+      !incrementalArrayCanAdd(frame.schemas, frame.items.length)
+    )
+      return invalidateIncremental(
+        machine,
+        "Array cannot contain another item",
+      );
+    return beginIncrementalValue(
+      machine,
+      character,
+      schemas,
+      references,
+      maxDepth,
+    );
+  }
+  if (
+    machine.expectation === "objectKeyOrEnd" ||
+    machine.expectation === "objectKey"
+  ) {
+    const frame = machine.stack[
+      machine.stack.length - 1
+    ] as IncrementalObjectFrame;
+    if (character === "}" && machine.expectation === "objectKeyOrEnd") {
+      const node = incrementalNodeForObject(frame.entries);
+      const parent = { ...machine, stack: machine.stack.slice(0, -1) };
+      return finishIncrementalValue(parent, node, frame.schemas, references);
+    }
+    if (
+      character !== '"' ||
+      !incrementalObjectCanAdd(frame.schemas, frame.entries)
+    )
+      return invalidateIncremental(machine, "Expected an object property name");
+    return {
+      ...machine,
+      lexeme: {
+        kind: "string",
+        value: "",
+        key: true,
+        escape: "none",
+        hexadecimal: "",
+      },
+    };
+  }
+  if (machine.expectation === "objectColon") {
+    if (character !== guidance.keySeparator[machine.separatorOffset])
+      return invalidateIncremental(machine, "Invalid object key separator");
+    const offset = machine.separatorOffset + 1;
+    return offset === guidance.keySeparator.length
+      ? { ...machine, expectation: "objectValue", separatorOffset: 0 }
+      : { ...machine, separatorOffset: offset };
+  }
+  if (machine.expectation === "objectValue") {
+    const frame = machine.stack[
+      machine.stack.length - 1
+    ] as IncrementalObjectFrame;
+    const schemas = incrementalPropertySchemas(frame.schemas, frame.key!);
+    return schemas === null
+      ? invalidateIncremental(machine, "Object property is not allowed")
+      : beginIncrementalValue(
+          machine,
+          character,
+          schemas,
+          references,
+          maxDepth,
+        );
+  }
+  if (
+    machine.expectation === "arrayAfterValue" ||
+    machine.expectation === "objectAfterValue"
+  ) {
+    const frame = machine.stack[machine.stack.length - 1];
+    const closer = frame.kind === "array" ? "]" : "}";
+    if (character === closer) {
+      const node: JsonNode =
+        frame.kind === "array"
+          ? {
+              kind: "array",
+              value: frame.items.map(({ value }) => value),
+              items: [...frame.items],
+            }
+          : incrementalNodeForObject(frame.entries);
+      const parent = { ...machine, stack: machine.stack.slice(0, -1) };
+      return finishIncrementalValue(parent, node, frame.schemas, references);
+    }
+    if (character !== guidance.itemSeparator[0])
+      return invalidateIncremental(machine, "Invalid JSON item separator");
+    const expectation =
+      frame.kind === "array" ? "arraySeparator" : "objectSeparator";
+    return guidance.itemSeparator.length === 1
+      ? {
+          ...machine,
+          expectation: frame.kind === "array" ? "arrayValue" : "objectKey",
+          separatorOffset: 0,
+        }
+      : { ...machine, expectation, separatorOffset: 1 };
+  }
+  if (
+    machine.expectation === "arraySeparator" ||
+    machine.expectation === "objectSeparator"
+  ) {
+    if (character !== guidance.itemSeparator[machine.separatorOffset])
+      return invalidateIncremental(machine, "Invalid JSON item separator");
+    const offset = machine.separatorOffset + 1;
+    if (offset !== guidance.itemSeparator.length)
+      return { ...machine, separatorOffset: offset };
+    return {
+      ...machine,
+      expectation:
+        machine.expectation === "arraySeparator" ? "arrayValue" : "objectKey",
+      separatorOffset: 0,
+    };
+  }
+  return beginIncrementalValue(
+    machine,
+    character,
+    rootSchemas,
+    references,
+    maxDepth,
+  );
+}
+
+function feedIncrementalByte(
+  machine: IncrementalMachine,
+  byte: number,
+  rootSchemas: SchemaSet,
+  references: Map<string, Schema>,
+  guidance: Guidance,
+  maxDepth: number,
+): IncrementalMachine {
+  if (machine.invalid !== undefined) return machine;
+  let utf8 = machine.utf8;
+  if (utf8.expected === 0) {
+    if (byte <= 0x7f)
+      return feedIncrementalCharacter(
+        machine,
+        String.fromCodePoint(byte),
+        rootSchemas,
+        references,
+        guidance,
+        maxDepth,
+      );
+    if (byte >= 0xc2 && byte <= 0xdf)
+      utf8 = {
+        expected: 2,
+        seen: 1,
+        codePoint: byte & 0x1f,
+        minimum: 0x80,
+        first: byte,
+      };
+    else if (byte >= 0xe0 && byte <= 0xef)
+      utf8 = {
+        expected: 3,
+        seen: 1,
+        codePoint: byte & 0x0f,
+        minimum: 0x800,
+        first: byte,
+      };
+    else if (byte >= 0xf0 && byte <= 0xf4)
+      utf8 = {
+        expected: 4,
+        seen: 1,
+        codePoint: byte & 0x07,
+        minimum: 0x10000,
+        first: byte,
+      };
+    else return invalidateIncremental(machine, "Invalid UTF-8 leading byte");
+    return { ...machine, utf8 };
+  }
+  if (
+    byte < 0x80 ||
+    byte > 0xbf ||
+    (utf8.seen === 1 &&
+      ((utf8.first === 0xe0 && byte < 0xa0) ||
+        (utf8.first === 0xed && byte > 0x9f) ||
+        (utf8.first === 0xf0 && byte < 0x90) ||
+        (utf8.first === 0xf4 && byte > 0x8f)))
+  )
+    return invalidateIncremental(machine, "Invalid UTF-8 continuation byte");
+  const codePoint = (utf8.codePoint << 6) | (byte & 0x3f);
+  const seen = utf8.seen + 1;
+  if (seen !== utf8.expected)
+    return { ...machine, utf8: { ...utf8, seen, codePoint } };
+  if (
+    codePoint < utf8.minimum ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  )
+    return invalidateIncremental(machine, "Invalid UTF-8 code point");
+  return feedIncrementalCharacter(
+    { ...machine, utf8: emptyUtf8Machine },
+    String.fromCodePoint(codePoint),
+    rootSchemas,
+    references,
+    guidance,
+    maxDepth,
+  );
+}
+
+function materializeIncrementalBytes(
+  state: InternalUtf8State,
+  instrumentation: JsonParserInstrumentation,
+): Uint8Array {
+  instrumentation.materializedBytes += state.length;
+  const bytes = new Uint8Array(state.length);
+  let current: InternalUtf8State | undefined = state;
+  for (let index = state.length - 1; index >= 0; index -= 1) {
+    bytes[index] = current!.byte!;
+    current = current!.parent;
+  }
+  return bytes;
+}
+
+interface CachedIncrementalTransition {
+  readonly source: InternalUtf8State;
+  readonly byte: number;
+  readonly target: InternalUtf8State;
+}
+
+class IncrementalTransitionCache {
+  private readonly owner: object;
+  private readonly maxEntries: number;
+  private readonly instrumentation: JsonParserInstrumentation;
+  private readonly transitions = new WeakMap<
+    InternalUtf8State,
+    Map<number, InternalUtf8State>
+  >();
+  private queue: Array<CachedIncrementalTransition | undefined> = [];
+  private queueOffset = 0;
+  private entryCount = 0;
+
+  constructor(
+    owner: object,
+    maxEntries: number,
+    instrumentation: JsonParserInstrumentation,
+  ) {
+    this.owner = owner;
+    this.maxEntries = maxEntries;
+    this.instrumentation = instrumentation;
+  }
+
+  get(source: InternalUtf8State, byte: number): InternalUtf8State | undefined {
+    if (source.owner !== this.owner || source.length >= MAX_CACHED_STATE_BYTES)
+      return undefined;
+    const target = this.transitions.get(source)?.get(byte);
+    if (target === undefined) {
+      this.instrumentation.transitionCacheMisses += 1;
+      return undefined;
+    }
+    this.instrumentation.transitionCacheHits += 1;
+    return target;
+  }
+
+  set(
+    source: InternalUtf8State,
+    byte: number,
+    target: InternalUtf8State,
+  ): void {
+    if (
+      this.maxEntries === 0 ||
+      source.owner !== this.owner ||
+      target.owner !== this.owner ||
+      target.length > MAX_CACHED_STATE_BYTES
+    )
+      return;
+    let byByte = this.transitions.get(source);
+    if (byByte === undefined) {
+      byByte = new Map();
+      this.transitions.set(source, byByte);
+    }
+    if (byByte.has(byte)) return;
+    byByte.set(byte, target);
+    this.queue.push({ source, byte, target });
+    this.entryCount += 1;
+    while (this.entryCount > this.maxEntries) this.evictOldest();
+    this.instrumentation.transitionCacheEntries = this.entryCount;
+  }
+
+  private evictOldest(): void {
+    const oldest = this.queue[this.queueOffset]!;
+    this.queue[this.queueOffset] = undefined;
+    this.queueOffset += 1;
+    const byByte = this.transitions.get(oldest.source);
+    if (byByte?.get(oldest.byte) === oldest.target) {
+      byByte.delete(oldest.byte);
+      if (byByte.size === 0) this.transitions.delete(oldest.source);
+      this.entryCount -= 1;
+      this.instrumentation.transitionCacheEvictions += 1;
+    }
+    if (
+      this.queueOffset >= this.maxEntries &&
+      this.queueOffset * 2 >= this.queue.length
+    ) {
+      this.queue = this.queue.slice(this.queueOffset);
+      this.queueOffset = 0;
+    }
+  }
+}
+
+function makeIncrementalState(
+  owner: object,
+  machine: IncrementalMachine,
+  parent: InternalUtf8State | undefined,
+  byte: number | undefined,
+  length: number,
+  result: JsonPrefixResult,
+  instrumentation: JsonParserInstrumentation,
+): InternalUtf8State {
+  instrumentation.incrementalStatesCreated += 1;
+  const state = {
+    owner,
+    machine,
+    parent,
+    byte,
+    length,
+    result,
+  } as InternalUtf8State;
+  Object.defineProperty(state, "bytes", {
+    enumerable: true,
+    get: () => materializeIncrementalBytes(state, instrumentation),
+  });
+  return Object.freeze(state);
+}
+
 /** Compile a supported JSON Schema into prefix and final-document checks. */
 export function compileJsonSchema(
   schema: unknown,
@@ -2346,11 +3563,43 @@ export function compileJsonSchema(
 ): CompiledJsonSchema {
   const maxSchemaDepth = options.maxSchemaDepth ?? 128;
   const maxJsonDepth = options.maxJsonDepth ?? 128;
+  const maxTransitionCacheEntries =
+    options.maxTransitionCacheEntries ?? DEFAULT_TRANSITION_CACHE_ENTRIES;
+  if (
+    !Number.isSafeInteger(maxTransitionCacheEntries) ||
+    maxTransitionCacheEntries < 0 ||
+    maxTransitionCacheEntries > MAX_TRANSITION_CACHE_ENTRIES
+  )
+    throw new RangeError(
+      `maxTransitionCacheEntries must be an integer between 0 and ${MAX_TRANSITION_CACHE_ENTRIES}`,
+    );
   assertSchemaDepth(schema, maxSchemaDepth);
   const root: Schema =
     typeof schema === "boolean" ? schema : schemaObject(schema, "schema");
   const references = compileChecks(root);
   const guidance = guidanceFor(root);
+  const instrumentation = options.instrumentation ?? {
+    incrementalBytes: 0,
+    fallbackParses: 0,
+    materializedBytes: 0,
+    transitionCacheHits: 0,
+    transitionCacheMisses: 0,
+    transitionCacheEntries: 0,
+    transitionCacheEvictions: 0,
+    incrementalStatesCreated: 0,
+  };
+  instrumentation.transitionCacheHits ??= 0;
+  instrumentation.transitionCacheMisses ??= 0;
+  instrumentation.transitionCacheEntries ??= 0;
+  instrumentation.transitionCacheEvictions ??= 0;
+  instrumentation.incrementalStatesCreated ??= 0;
+  const useIncrementalState = schemaSupportsIncrementalState(root);
+  const cacheOwner = {};
+  const transitionCache = new IncrementalTransitionCache(
+    cacheOwner,
+    maxTransitionCacheEntries,
+    instrumentation,
+  );
 
   const analyzeText = (text: string): JsonPrefixResult => {
     try {
@@ -2414,10 +3663,28 @@ export function compileJsonSchema(
   };
 
   const initialResult = analyzeText("");
-  const initialUtf8 = Object.freeze({
-    bytes: new Uint8Array(0),
-    result: initialResult,
-  });
+  const initialMachine: IncrementalMachine = {
+    expectation: "value",
+    stack: [],
+    separatorOffset: 0,
+    started: false,
+    utf8: emptyUtf8Machine,
+  };
+  const initialUtf8: InternalUtf8State = useIncrementalState
+    ? makeIncrementalState(
+        cacheOwner,
+        initialMachine,
+        undefined,
+        undefined,
+        0,
+        initialResult,
+        instrumentation,
+      )
+    : (Object.freeze({
+        bytes: new Uint8Array(0),
+        result: initialResult,
+        length: 0,
+      }) as InternalUtf8State);
   return {
     initial: Object.freeze({ text: "", result: initialResult }),
     initialUtf8,
@@ -2432,12 +3699,50 @@ export function compileJsonSchema(
       return { text: combined, result: analyzeText(combined) };
     },
     appendUtf8: (state, bytes) => {
-      const combined = appendBytes(state.bytes, bytes);
-      return { bytes: combined, result: analyzeUtf8(combined) };
+      if (!useIncrementalState) {
+        instrumentation.fallbackParses += 1;
+        const combined = appendBytes(state.bytes, bytes);
+        return { bytes: combined, result: analyzeUtf8(combined) };
+      }
+      let current = state as InternalUtf8State;
+      for (const byte of bytes) {
+        instrumentation.incrementalBytes += 1;
+        const cached = transitionCache.get(current, byte);
+        if (cached !== undefined) {
+          current = cached;
+          continue;
+        }
+        const machine = feedIncrementalByte(
+          current.machine!,
+          byte,
+          [root],
+          references,
+          guidance,
+          maxJsonDepth,
+        );
+        current = makeIncrementalState(
+          cacheOwner,
+          machine,
+          current,
+          byte,
+          current.length + 1,
+          incrementalResult(
+            machine,
+            [root],
+            references,
+            guidance,
+            maxJsonDepth,
+          ),
+          instrumentation,
+        );
+        transitionCache.set(current.parent!, byte, current);
+      }
+      return current;
     },
     viable: (state) => state.result.viable,
     accepting: (state) => state.result.accepted,
     finish: (state) => state.result.accepted,
+    instrumentation: () => ({ ...instrumentation }),
   };
 }
 
