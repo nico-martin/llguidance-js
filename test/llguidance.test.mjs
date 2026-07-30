@@ -125,6 +125,21 @@ test("reuses a converted callable tokenizer across single-stream interpreters", 
   assert.equal("mask" in second.computeMask(), true);
 });
 
+test("does not confuse an external tokenizer backend with an llguidance tokenizer", async () => {
+  const runtime = await loadBundledLLGuidance();
+  function tokenizer() {}
+  tokenizer._tokenizer = { backend: "external" };
+  tokenizer._tokenizerJSON = { model: { vocab: { a: 0, "</s>": 1 } } };
+  tokenizer.eos_token_id = 1;
+
+  const interpreter = runtime.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "a" },
+  });
+
+  assert.equal("mask" in interpreter.computeMask(), true);
+});
+
 test("requires a reliable external EOS instead of using the final vocab id", async () => {
   const runtime = await loadBundledLLGuidance();
   function tokenizer() {}

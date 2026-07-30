@@ -43,7 +43,7 @@ export function createHandleRuntime<
   const resolveTokenizer = (tokenizer: TokenizerSource): TTokenizer => {
     const key = requireObjectLike(tokenizer);
     const wrapped = (key as Record<string, unknown>)._tokenizer;
-    if (wrapped) return wrapped as TTokenizer;
+    if (wrapped instanceof mod.LLGuidanceTokenizer) return wrapped;
     if (ownedTokenizers.has(key as TTokenizer)) return key as TTokenizer;
 
     let converted = externalTokenizerCache.get(key);
