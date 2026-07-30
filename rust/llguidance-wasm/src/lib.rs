@@ -104,16 +104,24 @@ impl LLGuidanceInterpreter {
             .map_err(|err| js_error(format!("computeMask failed: {err}")))?;
 
         if step.is_stop() {
-            return serde_wasm_bindgen::to_value(&json!({ "stop": true }))
-                .map_err(|err| js_error(format!("failed to serialize stop result: {err}")));
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &JsValue::from_str("stop"), &JsValue::TRUE)?;
+            return Ok(result.into());
         }
 
         if let Some(splice) = step.unconditional_splice() {
-            return serde_wasm_bindgen::to_value(&json!({
-                "backtrack": splice.backtrack,
-                "ffTokens": splice.ff_tokens,
-            }))
-            .map_err(|err| js_error(format!("failed to serialize splice result: {err}")));
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &result,
+                &JsValue::from_str("backtrack"),
+                &JsValue::from_f64(splice.backtrack as f64),
+            )?;
+            js_sys::Reflect::set(
+                &result,
+                &JsValue::from_str("ffTokens"),
+                js_sys::Uint32Array::from(splice.ff_tokens.as_slice()).as_ref(),
+            )?;
+            return Ok(result.into());
         }
 
         let mask = step
@@ -138,12 +146,29 @@ impl LLGuidanceInterpreter {
             .commit_token(Some(token_id))
             .map_err(|err| js_error(format!("commitToken failed: {err}")))?;
 
-        serde_wasm_bindgen::to_value(&json!({
-            "stop": result.stop,
-            "backtrack": result.backtrack,
-            "ffTokens": result.ff_tokens,
-        }))
-        .map_err(|err| js_error(format!("failed to serialize commit result: {err}")))
+        // Runs per generated token: build the result directly instead of going
+        // through serde_json + serde_wasm_bindgen.
+        let out = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &out,
+            &JsValue::from_str("stop"),
+            &JsValue::from_bool(result.stop),
+        )?;
+        if result.backtrack != 0 {
+            js_sys::Reflect::set(
+                &out,
+                &JsValue::from_str("backtrack"),
+                &JsValue::from_f64(result.backtrack as f64),
+            )?;
+        }
+        if !result.ff_tokens.is_empty() {
+            js_sys::Reflect::set(
+                &out,
+                &JsValue::from_str("ffTokens"),
+                js_sys::Uint32Array::from(result.ff_tokens.as_slice()).as_ref(),
+            )?;
+        }
+        Ok(out.into())
     }
 }
 

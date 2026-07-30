@@ -18,11 +18,19 @@ llguidance = { version = "=1.2.0", default-features = false, features = ["lark",
 toktrie = "=1.2.0"
 
 [profile.release]
-opt-level = "z"
+# compute_mask() runs per generated token; optimize for speed, not size.
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+wasm-opt = [
+  "-O3",
+  "--enable-simd",
+  "--enable-bulk-memory",
+  "--enable-nontrapping-float-to-int",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+]
