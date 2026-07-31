@@ -1,6 +1,6 @@
 {
   "name": "llguidance",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Browser and Node.js TypeScript implementation of llguidance constrained decoding.",
   "private": true,
   "type": "module",
