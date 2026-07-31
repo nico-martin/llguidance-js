@@ -1,0 +1,13 @@
+/Users/nico/Documents/Dev/llguidance-js/rust/llguidance-wasm/target/wasm32-unknown-unknown/release/deps/getrandom-7754e05a3986b32a.d: /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/lib.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/backends.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/error.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/util.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/../README.md
+
+/Users/nico/Documents/Dev/llguidance-js/rust/llguidance-wasm/target/wasm32-unknown-unknown/release/deps/libgetrandom-7754e05a3986b32a.rlib: /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/lib.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/backends.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/error.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/util.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/../README.md
+
+/Users/nico/Documents/Dev/llguidance-js/rust/llguidance-wasm/target/wasm32-unknown-unknown/release/deps/libgetrandom-7754e05a3986b32a.rmeta: /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/lib.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/backends.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/error.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/util.rs /Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/../README.md
+
+/Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/lib.rs:
+/Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/backends.rs:
+/Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/error.rs:
+/Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/util.rs:
+/Users/nico/.cargo/registry/src/cargo.registries.huggingface.tech-567f0d49c5321730/getrandom-0.3.4/src/../README.md:
+
+# env-dep:CARGO_PKG_VERSION=0.3.4

@@ -5,6 +5,8 @@ const LARK_UNSUPPORTED =
 const UPSTREAM_UNSUPPORTED =
   "Raw llguidance/guidance serialized grammars are not supported by the pure TypeScript core backend; use a marker produced by this backend";
 const MAX_COMPILED_PROGRAMS = 64;
+const MAX_SHARED_JSON_MASK_ENTRIES = 64;
+const MAX_SHARED_JSON_MASK_WORDS = 262_144;
 
 export interface TokenizerConfig {
   tokens?: Array<Uint8Array | readonly number[]>;
@@ -68,6 +70,8 @@ interface CompiledJsonSchema {
   appendUtf8(state: JsonEngineState, bytes: Uint8Array): JsonEngineState;
   viable(state: JsonEngineState): boolean;
   accepting(state: JsonEngineState): boolean;
+  /** Returns a conservative semantic key for states with identical token masks. */
+  maskEquivalenceKey?(state: JsonEngineState): string | undefined;
 }
 
 interface JsonEngineState {}
@@ -109,12 +113,27 @@ type TokenizerData = {
   readonly trie: TokenTrieNode;
   readonly eos: number;
   readonly special: ReadonlySet<number>;
+  readonly maxNormalTokenBytes: number;
+  /** Normal tokens that can always extend an unconstrained open JSON string. */
+  readonly openStringSafeMask: Uint32Array;
+  readonly openStringSafeCount: number;
+  /** Normal tokens that need a parser transition in an open JSON string. */
+  readonly openStringExceptionalTokens: readonly number[];
 };
 
 export type StopReason = "accepted" | "dead_end";
 
 export type MaskResult =
   { mask: Uint32Array; vocabSize: number } | { stop: true; reason: StopReason };
+
+export interface MaskCacheInstrumentation {
+  trieNodesVisited: number;
+  sharedJsonMaskCacheHits: number;
+  sharedJsonMaskCacheMisses: number;
+  sharedJsonMaskCacheEntries: number;
+  sharedJsonMaskCacheWords: number;
+  sharedJsonMaskCacheEvictions: number;
+}
 
 export interface CommitResult {
   stop: boolean;
@@ -140,6 +159,7 @@ export interface InterpreterHandle {
   computeFastForward(maxTokens?: number): number[];
   getCapture(name: string): GrammarCapture | null;
   getCaptures(name?: string): GrammarCapture[];
+  maskInstrumentation(): Readonly<MaskCacheInstrumentation>;
   free(): void;
   dispose(): void;
 }
@@ -172,11 +192,14 @@ export class LLGuidanceTokenizer {
       const tokens = Array.from({ length: 262 }, (_, id) =>
         id < 256 ? Uint8Array.of(id) : new Uint8Array(0),
       );
+      const special = new Set([256, 257, 258, 259, 260, 261]);
       tokenizerData.set(this, {
         tokenBytes: tokens,
         trie: buildTokenTrie(tokens),
         eos: 261,
-        special: new Set([256, 257, 258, 259, 260, 261]),
+        special,
+        maxNormalTokenBytes: 1,
+        ...openStringTokenData(tokens, special),
       });
       return;
     }
@@ -217,6 +240,8 @@ export class LLGuidanceTokenizer {
       trie: buildTokenTrie(tokenBytes),
       eos,
       special,
+      maxNormalTokenBytes: maxNormalTokenBytes(tokenBytes, special),
+      ...openStringTokenData(tokenBytes, special),
     });
   }
 
@@ -268,6 +293,7 @@ class CoreLLGuidanceInterpreter {
   private trieStates: Array<RegexState | JsonEngineState> = [];
   private pendingToken = -1;
   private pendingState: RegexState | JsonEngineState | null = null;
+  private sharedJsonMasks: SharedJsonMaskCache | undefined;
 
   constructor(
     tokenizer: LLGuidanceTokenizer,
@@ -303,6 +329,7 @@ class CoreLLGuidanceInterpreter {
       }
       const compiled = programs.json(marker, this.limits);
       this.engine = { kind: "json", compiled, state: compiled.initialUtf8 };
+      this.sharedJsonMasks = programs.jsonMasks(tokenizer, compiled);
     }
   }
 
@@ -399,6 +426,7 @@ class CoreLLGuidanceInterpreter {
     copy.trieStates = [];
     copy.pendingToken = -1;
     copy.pendingState = null;
+    copy.sharedJsonMasks = this.sharedJsonMasks;
     return copy;
   }
 
@@ -464,6 +492,12 @@ class CoreLLGuidanceInterpreter {
       : captures
           .filter((capture) => capture.name === name)
           .map((capture) => ({ ...capture }));
+  }
+
+  maskInstrumentation(): Readonly<MaskCacheInstrumentation> {
+    return (
+      this.sharedJsonMasks?.instrumentation() ?? EMPTY_MASK_INSTRUMENTATION
+    );
   }
 
   free(): void {
@@ -556,6 +590,17 @@ class CoreLLGuidanceInterpreter {
     if (this.engine.kind !== "json") throw new Error("invalid JSON engine");
     const data = getTokenizerData(this.tokenizer);
     const { compiled, state } = this.engine;
+    if (this.canUseOpenStringFastPath(data, compiled, state)) {
+      mask.set(data.openStringSafeMask);
+      let eligible = data.openStringSafeCount;
+      for (const token of data.openStringExceptionalTokens) {
+        const candidate = compiled.appendUtf8(state, data.tokenBytes[token]);
+        if (!compiled.viable(candidate)) continue;
+        setMaskBit(mask, token);
+        eligible += 1;
+      }
+      return eligible;
+    }
     let eligible = 0;
     if (compiled.accepting(state)) {
       setMaskBit(mask, data.eos);
@@ -570,6 +615,7 @@ class CoreLLGuidanceInterpreter {
     while (stackLength !== 0) {
       stackLength -= 1;
       const node = nodes[stackLength];
+      this.sharedJsonMasks?.recordTrieNode();
       const currentState = states[stackLength] as JsonEngineState;
       for (const token of node.terminalTokenIds) {
         if (token === data.eos || isSpecialToken(data, token)) continue;
@@ -591,6 +637,25 @@ class CoreLLGuidanceInterpreter {
     nodes.length = 0;
     states.length = 0;
     return eligible;
+  }
+
+  private canUseOpenStringFastPath(
+    data: TokenizerData,
+    compiled: CompiledJsonSchema,
+    state: JsonEngineState,
+  ): boolean {
+    // The parser signal excludes property names, escapes, partial UTF-8, and
+    // schemas whose string content affects future validity.
+    if (
+      !compiled.viable(state) ||
+      compiled.maskEquivalenceKey?.(state) === undefined
+    )
+      return false;
+    return (
+      this.generatedTokens < this.limits.maxTokens &&
+      this.generatedBytes + data.maxNormalTokenBytes <=
+        this.limits.maxOutputBytes
+    );
   }
 
   private tokenAllowed(token: number): boolean {
@@ -620,6 +685,14 @@ class CoreLLGuidanceInterpreter {
   private computeMaskCached(vocabSize: number): MaskResult {
     if (this.stopped) return { stop: true, reason: "accepted" };
     if (this.maskCache !== null) return this.maskCache;
+    const sharedKey = this.jsonMaskCacheKey();
+    if (sharedKey !== undefined) {
+      const shared = this.sharedJsonMasks!.get(sharedKey);
+      if (shared !== undefined) {
+        this.maskCache = shared;
+        return shared;
+      }
+    }
     const mask = new Uint32Array(Math.ceil(vocabSize / 32));
     const eligible =
       this.engine.kind === "regex"
@@ -627,7 +700,30 @@ class CoreLLGuidanceInterpreter {
         : this.computeJsonMask(mask);
     this.maskCache =
       eligible === 0 ? { stop: true, reason: "dead_end" } : { mask, vocabSize };
+    if (sharedKey !== undefined && "mask" in this.maskCache)
+      this.sharedJsonMasks!.set(sharedKey, this.maskCache);
     return this.maskCache;
+  }
+
+  private jsonMaskCacheKey(): string | undefined {
+    if (this.engine.kind !== "json" || this.sharedJsonMasks === undefined)
+      return undefined;
+    const semantic = this.engine.compiled.maskEquivalenceKey?.(
+      this.engine.state,
+    );
+    if (semantic === undefined) return undefined;
+    const data = getTokenizerData(this.tokenizer);
+    // Only the immediate next-token budget affects a mask. Exact remaining
+    // budgets would turn every generation step into a cache miss even while
+    // every normal vocabulary token remains eligible.
+    const tokenBudget =
+      this.generatedTokens < this.limits.maxTokens ? "open" : "closed";
+    const remainingBytes = this.limits.maxOutputBytes - this.generatedBytes;
+    const byteBudget =
+      remainingBytes >= data.maxNormalTokenBytes
+        ? "open"
+        : String(remainingBytes);
+    return `${semantic}\u0000${tokenBudget}\u0000${byteBudget}`;
   }
 
   private clearPendingTransition(): void {
@@ -698,6 +794,70 @@ class BoundedCache<K, V> {
   }
 }
 
+const EMPTY_MASK_INSTRUMENTATION: Readonly<MaskCacheInstrumentation> =
+  Object.freeze({
+    trieNodesVisited: 0,
+    sharedJsonMaskCacheHits: 0,
+    sharedJsonMaskCacheMisses: 0,
+    sharedJsonMaskCacheEntries: 0,
+    sharedJsonMaskCacheWords: 0,
+    sharedJsonMaskCacheEvictions: 0,
+  });
+
+class SharedJsonMaskCache {
+  private readonly values = new Map<
+    string,
+    { mask: Uint32Array; vocabSize: number }
+  >();
+  private words = 0;
+  private readonly stats: MaskCacheInstrumentation = {
+    ...EMPTY_MASK_INSTRUMENTATION,
+  };
+
+  get(key: string): { mask: Uint32Array; vocabSize: number } | undefined {
+    const value = this.values.get(key);
+    if (value === undefined) {
+      this.stats.sharedJsonMaskCacheMisses += 1;
+      return undefined;
+    }
+    this.values.delete(key);
+    this.values.set(key, value);
+    this.stats.sharedJsonMaskCacheHits += 1;
+    return value;
+  }
+
+  set(key: string, value: { mask: Uint32Array; vocabSize: number }): void {
+    const existing = this.values.get(key);
+    if (existing !== undefined) {
+      this.values.delete(key);
+      this.words -= existing.mask.length;
+    }
+    if (value.mask.length > MAX_SHARED_JSON_MASK_WORDS) return;
+    this.values.set(key, value);
+    this.words += value.mask.length;
+    while (
+      this.values.size > MAX_SHARED_JSON_MASK_ENTRIES ||
+      this.words > MAX_SHARED_JSON_MASK_WORDS
+    ) {
+      const oldestKey = this.values.keys().next().value!;
+      const oldest = this.values.get(oldestKey)!;
+      this.values.delete(oldestKey);
+      this.words -= oldest.mask.length;
+      this.stats.sharedJsonMaskCacheEvictions += 1;
+    }
+    this.stats.sharedJsonMaskCacheEntries = this.values.size;
+    this.stats.sharedJsonMaskCacheWords = this.words;
+  }
+
+  recordTrieNode(): void {
+    this.stats.trieNodesVisited += 1;
+  }
+
+  instrumentation(): Readonly<MaskCacheInstrumentation> {
+    return { ...this.stats };
+  }
+}
+
 class CompiledProgramCache {
   readonly compilers: EngineCompilers;
   private readonly regexPrograms = new BoundedCache<string, CompiledRegex>();
@@ -706,6 +866,10 @@ class CompiledProgramCache {
     CompiledJsonSchema
   >();
   private readonly schemaIds = new WeakMap<object, number>();
+  private readonly jsonMaskCaches = new WeakMap<
+    LLGuidanceTokenizer,
+    WeakMap<CompiledJsonSchema, SharedJsonMaskCache>
+  >();
   private nextSchemaId = 0;
 
   constructor(compilers: EngineCompilers) {
@@ -744,6 +908,23 @@ class CompiledProgramCache {
     const compiled = this.compilers.compileJsonSchema!(schema, limits);
     this.jsonPrograms.set(key, compiled);
     return compiled;
+  }
+
+  jsonMasks(
+    tokenizer: LLGuidanceTokenizer,
+    compiled: CompiledJsonSchema,
+  ): SharedJsonMaskCache {
+    let byProgram = this.jsonMaskCaches.get(tokenizer);
+    if (byProgram === undefined) {
+      byProgram = new WeakMap();
+      this.jsonMaskCaches.set(tokenizer, byProgram);
+    }
+    let cache = byProgram.get(compiled);
+    if (cache === undefined) {
+      cache = new SharedJsonMaskCache();
+      byProgram.set(compiled, cache);
+    }
+    return cache;
   }
 
   private schemaIdentity(schema: object): number {
@@ -986,6 +1167,78 @@ function buildTokenTrie(tokens: readonly Uint8Array[]): TokenTrieNode {
     node.children = null;
   }
   return root;
+}
+
+function maxNormalTokenBytes(
+  tokens: readonly Uint8Array[],
+  special: ReadonlySet<number>,
+): number {
+  let maximum = 0;
+  for (let token = 0; token < tokens.length; token += 1) {
+    if (!special.has(token) && tokens[token].length !== 0)
+      maximum = Math.max(maximum, tokens[token].length);
+  }
+  return maximum;
+}
+
+function openStringTokenData(
+  tokens: readonly Uint8Array[],
+  special: ReadonlySet<number>,
+): Pick<
+  TokenizerData,
+  "openStringSafeMask" | "openStringSafeCount" | "openStringExceptionalTokens"
+> {
+  const openStringSafeMask = new Uint32Array(Math.ceil(tokens.length / 32));
+  const openStringExceptionalTokens: number[] = [];
+  let openStringSafeCount = 0;
+  for (let token = 0; token < tokens.length; token += 1) {
+    const bytes = tokens[token];
+    if (special.has(token) || bytes.length === 0) continue;
+    if (isSafeOpenJsonStringToken(bytes)) {
+      setMaskBit(openStringSafeMask, token);
+      openStringSafeCount += 1;
+    } else {
+      openStringExceptionalTokens.push(token);
+    }
+  }
+  return {
+    openStringSafeMask,
+    openStringSafeCount,
+    openStringExceptionalTokens,
+  };
+}
+
+function isSafeOpenJsonStringToken(bytes: Uint8Array): boolean {
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    if (byte < 0x20 || byte === 0x22 || byte === 0x5c) return false;
+    if (byte <= 0x7f) continue;
+    const length =
+      byte >= 0xc2 && byte <= 0xdf
+        ? 2
+        : byte <= 0xef
+          ? 3
+          : byte <= 0xf4
+            ? 4
+            : 0;
+    if (length === 0 || index + length > bytes.length) return false;
+    const next = bytes[index + 1];
+    if (
+      next < 0x80 ||
+      next > 0xbf ||
+      (byte === 0xe0 && next < 0xa0) ||
+      (byte === 0xed && next > 0x9f) ||
+      (byte === 0xf0 && next < 0x90) ||
+      (byte === 0xf4 && next > 0x8f)
+    )
+      return false;
+    for (let offset = 2; offset < length; offset += 1) {
+      const continuation = bytes[index + offset];
+      if (continuation < 0x80 || continuation > 0xbf) return false;
+    }
+    index += length - 1;
+  }
+  return true;
 }
 
 function getTokenizerData(tokenizer: LLGuidanceTokenizer): TokenizerData {

@@ -52,6 +52,8 @@ export interface CompiledJsonSchema {
   ): JsonUtf8PrefixState;
   viable(state: JsonUtf8PrefixState): boolean;
   accepting(state: JsonUtf8PrefixState): boolean;
+  /** A conservative key for open strings whose content cannot affect a mask. */
+  maskEquivalenceKey(state: JsonUtf8PrefixState): string | undefined;
   finish(state: JsonPrefixState): boolean;
   /** A snapshot of parser work, intended for diagnostics and benchmarks. */
   instrumentation(): Readonly<JsonParserInstrumentation>;
@@ -2733,6 +2735,27 @@ function incrementalStringPrefixViable(
   );
 }
 
+function isMaskInvariantStringSchema(schema: Schema): boolean {
+  if (typeof schema === "boolean" || schema.type !== "string") return false;
+  // These keywords make either continuation or the closing quote depend on
+  // accumulated string content. Keep this list intentionally conservative.
+  return ![
+    "minLength",
+    "maxLength",
+    "enum",
+    "const",
+    "pattern",
+    "format",
+    "contentEncoding",
+    "contentMediaType",
+    "contentSchema",
+  ].some((keyword) => schema[keyword] !== undefined);
+}
+
+function hasMaskInvariantStringSchemas(schemas: SchemaSet): boolean {
+  return schemas.length !== 0 && schemas.every(isMaskInvariantStringSchema);
+}
+
 function incrementalCurrentValueSchemas(
   machine: IncrementalMachine,
   rootSchemas: SchemaSet,
@@ -3595,6 +3618,8 @@ export function compileJsonSchema(
   instrumentation.incrementalStatesCreated ??= 0;
   const useIncrementalState = schemaSupportsIncrementalState(root);
   const cacheOwner = {};
+  const parserContextIds = new WeakMap<object, number>();
+  let nextParserContextId = 0;
   const transitionCache = new IncrementalTransitionCache(
     cacheOwner,
     maxTransitionCacheEntries,
@@ -3741,6 +3766,31 @@ export function compileJsonSchema(
     },
     viable: (state) => state.result.viable,
     accepting: (state) => state.result.accepted,
+    maskEquivalenceKey: (state) => {
+      if (!useIncrementalState) return undefined;
+      const internal = state as InternalUtf8State;
+      if (internal.owner !== cacheOwner) return undefined;
+      const machine = internal.machine!;
+      const lexeme = machine.lexeme;
+      // Property names and in-progress escapes have state-dependent languages.
+      if (
+        lexeme?.kind !== "string" ||
+        lexeme.key ||
+        lexeme.escape !== "none" ||
+        machine.utf8.expected !== 0
+      )
+        return undefined;
+      const schemas = incrementalCurrentValueSchemas(machine, [root]);
+      if (!hasMaskInvariantStringSchemas(schemas)) return undefined;
+      let contextId = parserContextIds.get(machine.stack);
+      if (contextId === undefined) {
+        contextId = nextParserContextId;
+        nextParserContextId += 1;
+        parserContextIds.set(machine.stack, contextId);
+      }
+      // Stack identity captures completed container structure and active schema.
+      return `string:${contextId}:${machine.expectation}:${machine.separatorOffset}:${machine.started ? 1 : 0}`;
+    },
     finish: (state) => state.result.accepted,
     instrumentation: () => ({ ...instrumentation }),
   };

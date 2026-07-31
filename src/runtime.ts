@@ -1,6 +1,7 @@
 import type {
   EngineModule,
   InterpreterHandle,
+  MaskCacheInstrumentation,
   MaskResult,
   TokenizerConfig,
   TokenizerHandle,
@@ -265,6 +266,10 @@ export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
 
     getCaptures(name?: string) {
       return this._interpreter.getCaptures(name);
+    }
+
+    maskInstrumentation(): Readonly<MaskCacheInstrumentation> {
+      return this._interpreter.maskInstrumentation();
     }
 
     free(): void {

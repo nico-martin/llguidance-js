@@ -25,6 +25,115 @@ function interpreterFor(schema, tokens) {
   });
 }
 
+function maskFor(engine, tokenizer, schema, commits, limits) {
+  const interpreter = new engine.LLGuidanceInterpreter(tokenizer, {
+    grammar: grammarFromJsonSchema(schema),
+    limits,
+  });
+  for (const token of commits) interpreter.commitToken(token);
+  const result = interpreter.computeMask();
+  assert.ok("mask" in result);
+  return { result, stats: interpreter.maskInstrumentation() };
+}
+
+function genericJsonEngine() {
+  return createEngine({
+    compileJsonSchema(schema, limits) {
+      const compiled = compileJsonSchema(schema, limits);
+      // Exercise the trie implementation without the open-string signal.
+      return { ...compiled, maskEquivalenceKey: undefined };
+    },
+  });
+}
+
+test("open unconstrained string fast mask exactly matches generic transitions", () => {
+  const tokens = [
+    encoder.encode('"'),
+    encoder.encode("plain"),
+    encoder.encode("é"),
+    encoder.encode('"'),
+    encoder.encode("\\"),
+    Uint8Array.of(0x1f),
+    Uint8Array.of(0xc3),
+    Uint8Array.of(0xa9),
+    Uint8Array.of(0xc3, 0x28),
+    encoder.encode("plain"),
+    encoder.encode("special"),
+    new Uint8Array(0),
+  ];
+  const tokenizer = new LLGuidanceTokenizer({
+    tokens,
+    eosTokenId: 11,
+    specialTokenIds: [10],
+  });
+  const schema = { type: "string" };
+  const fast = maskFor(
+    createEngine({ compileJsonSchema }),
+    tokenizer,
+    schema,
+    [0],
+  );
+  const generic = maskFor(genericJsonEngine(), tokenizer, schema, [0]);
+
+  assert.deepEqual(fast.result.mask, generic.result.mask);
+  assert.equal(fast.stats.trieNodesVisited, 0);
+  assert.ok(generic.stats.trieNodesVisited > 0);
+  for (const token of [1, 2, 3, 4, 6, 9])
+    assert.equal(tokenAllowed(fast.result, token), true, `token ${token}`);
+  for (const token of [5, 7, 8, 10, 11])
+    assert.equal(tokenAllowed(fast.result, token), false, `token ${token}`);
+});
+
+test("open string fast mask stays disabled for constrained parser states and limits", () => {
+  const tokens = [
+    encoder.encode("{"),
+    encoder.encode('"'),
+    encoder.encode("a"),
+    encoder.encode("\\"),
+    Uint8Array.of(0xc3),
+    Uint8Array.of(0xa9),
+    encoder.encode("ok"),
+    new Uint8Array(0),
+  ];
+  const tokenizer = new LLGuidanceTokenizer({ tokens, eosTokenId: 7 });
+  const cases = [
+    [{ type: "string", maxLength: 4 }, [1]],
+    [
+      {
+        type: "object",
+        properties: { a: { type: "string" } },
+        additionalProperties: false,
+      },
+      [0, 1],
+    ],
+    [{ type: "string" }, [1, 3]],
+    [{ type: "string" }, [1, 4]],
+    [{ type: "string" }, [1]],
+  ];
+  for (const [schema, commits] of cases) {
+    const limits =
+      commits.length === 1 && schema.type === "string"
+        ? { maxOutputBytes: 2 }
+        : undefined;
+    const fast = maskFor(
+      createEngine({ compileJsonSchema }),
+      tokenizer,
+      schema,
+      commits,
+      limits,
+    );
+    const generic = maskFor(
+      genericJsonEngine(),
+      tokenizer,
+      schema,
+      commits,
+      limits,
+    );
+    assert.deepEqual(fast.result.mask, generic.result.mask);
+    assert.ok(fast.stats.trieNodesVisited > 0);
+  }
+});
+
 test("JSON masks advance incremental states once per tokenizer trie edge", () => {
   const tokenCount = 1024;
   const tokens = Array.from({ length: tokenCount }, (_, index) =>
@@ -173,6 +282,103 @@ test("transition caches and branch states remain compiler-independent", () => {
   first.appendUtf8(first.initialUtf8, quote);
   assert.equal(first.instrumentation().transitionCacheHits, 1);
   assert.equal(second.instrumentation().transitionCacheHits, 0);
+});
+
+test("unconstrained JSON string masks reuse a shared tokenizer/program cache", () => {
+  const engine = createEngine({ compileJsonSchema });
+  const tokenizer = new LLGuidanceTokenizer({
+    tokens: [
+      encoder.encode('"'),
+      encoder.encode("a"),
+      encoder.encode("b"),
+      new Uint8Array(0),
+    ],
+    eosTokenId: 3,
+  });
+  const config = { grammar: grammarFromJsonSchema({ type: "string" }) };
+  const first = new engine.LLGuidanceInterpreter(tokenizer, config);
+  const second = new engine.LLGuidanceInterpreter(tokenizer, config);
+
+  first.commitToken(0);
+  first.commitToken(1);
+  assert.ok("mask" in first.computeMask());
+  const afterFirst = first.maskInstrumentation();
+
+  second.commitToken(0);
+  second.commitToken(2);
+  assert.ok("mask" in second.computeMask());
+  const afterSecond = second.maskInstrumentation();
+
+  assert.equal(
+    afterSecond.sharedJsonMaskCacheHits,
+    afterFirst.sharedJsonMaskCacheHits + 1,
+  );
+  assert.equal(afterSecond.trieNodesVisited, afterFirst.trieNodesVisited);
+});
+
+test("unconstrained string masks stay shared across successive commits", () => {
+  const engine = createEngine({ compileJsonSchema });
+  const tokenizer = new LLGuidanceTokenizer({
+    tokens: [
+      encoder.encode('"'),
+      encoder.encode("a"),
+      encoder.encode("b"),
+      new Uint8Array(0),
+    ],
+    eosTokenId: 3,
+  });
+  const interpreter = new engine.LLGuidanceInterpreter(tokenizer, {
+    grammar: grammarFromJsonSchema({ type: "string" }),
+  });
+
+  interpreter.commitToken(0);
+  interpreter.commitToken(1);
+  assert.ok("mask" in interpreter.computeMask());
+  const afterFirst = interpreter.maskInstrumentation();
+
+  interpreter.commitToken(2);
+  assert.ok("mask" in interpreter.computeMask());
+  const afterSecond = interpreter.maskInstrumentation();
+
+  assert.equal(
+    afterSecond.sharedJsonMaskCacheHits,
+    afterFirst.sharedJsonMaskCacheHits + 1,
+  );
+  assert.equal(afterSecond.trieNodesVisited, afterFirst.trieNodesVisited);
+});
+
+test("constrained JSON string masks never enter the shared semantic cache", () => {
+  const engine = createEngine({ compileJsonSchema });
+  const tokenizer = new LLGuidanceTokenizer({
+    tokens: [
+      encoder.encode('"'),
+      encoder.encode("a"),
+      encoder.encode("b"),
+      new Uint8Array(0),
+    ],
+    eosTokenId: 3,
+  });
+  const config = {
+    grammar: grammarFromJsonSchema({ type: "string", maxLength: 4 }),
+  };
+  const first = new engine.LLGuidanceInterpreter(tokenizer, config);
+  const second = new engine.LLGuidanceInterpreter(tokenizer, config);
+
+  first.commitToken(0);
+  first.commitToken(1);
+  assert.ok("mask" in first.computeMask());
+  const afterFirst = first.maskInstrumentation();
+
+  second.commitToken(0);
+  second.commitToken(2);
+  assert.ok("mask" in second.computeMask());
+  const afterSecond = second.maskInstrumentation();
+
+  assert.equal(
+    afterSecond.sharedJsonMaskCacheHits,
+    afterFirst.sharedJsonMaskCacheHits,
+  );
+  assert.ok(afterSecond.trieNodesVisited > afterFirst.trieNodesVisited);
 });
 
 test("partial UTF-8 lead bytes are rejected at an object root", () => {

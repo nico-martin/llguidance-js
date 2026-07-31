@@ -1,0 +1,1 @@
+/Users/nico/Documents/Dev/llguidance-js/rust/llguidance-wasm/target/wasm32-unknown-unknown/release/transformers_llguidance_wasm.wasm: /Users/nico/Documents/Dev/llguidance-js/rust/llguidance-wasm/src/lib.rs

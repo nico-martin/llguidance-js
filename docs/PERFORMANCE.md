@@ -37,6 +37,16 @@ default, has a hard limit of 16,384, retains parent chains only for prefixes up
 to 128 bytes, and excludes complex-schema fallback states. This accelerates
 hot schemas and common output prefixes without allowing unbounded retention.
 
+For an open value string constrained only by `{ "type": "string" }`, core also
+shares completed token masks across interpreters and equal-length content
+prefixes. The key includes the compiled program, tokenizer, parser container
+context, and remaining generation budgets. This cache is an LRU capped at 64
+masks and 262,144 `Uint32` words (1 MiB). It deliberately excludes property
+names, escapes/partial UTF-8, numbers, fallback states, and strings with
+length, enum/const, pattern, format, or content constraints. Use
+`interpreter.maskInstrumentation()` to inspect trie-node visits and shared-mask
+cache activity in benchmarks.
+
 Complex schemas and long generated prefixes can therefore cost more than regex masking. Conservative pruning can also leave additional candidates enabled until complete validation.
 
 ## Safety Limits
@@ -59,6 +69,12 @@ miss. Mutation is not observed while that identity remains cached.
 
 ```bash
 pnpm run bench:mask
+```
+
+For the synthetic high-vocabulary JSON semantic-cache check, run:
+
+```bash
+node scripts/benchmark-json-mask-cache.mjs
 ```
 
 The benchmark verifies mask correctness and operation-count reduction. Printed wall-clock timings are non-contractual and should only be compared on the same machine and runtime.
