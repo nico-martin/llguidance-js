@@ -3,11 +3,4 @@ import { compileRegex } from "./regex.ts";
 
 const engine = createEngine({ compileRegex });
 
-export const {
-  LLGuidanceTokenizer,
-  LLGuidanceInterpreter,
-  grammarFrom,
-  grammarFromJsonSchema,
-  grammarFromLark,
-  grammarFromRegex,
-} = engine;
+export const { LLGuidanceTokenizer, LLGuidanceInterpreter } = engine;

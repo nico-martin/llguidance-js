@@ -1,5 +1,7 @@
 /** A dependency-free JSON prefix parser and pragmatic JSON Schema validator. */
 
+import type { JsonMaskCompiler } from "./core.ts";
+
 export type JsonPrefixStatus = "invalid" | "incomplete" | "complete";
 
 export interface JsonPrefixResult {
@@ -36,7 +38,7 @@ export interface JsonParserInstrumentation {
   incrementalStatesCreated: number;
 }
 
-export interface CompiledJsonSchema {
+export interface CompiledJsonSchema extends JsonMaskCompiler<JsonUtf8PrefixState> {
   readonly initial: JsonPrefixState;
   readonly initialUtf8: JsonUtf8PrefixState;
   analyzeText(text: string): JsonPrefixResult;
@@ -46,14 +48,6 @@ export interface CompiledJsonSchema {
   acceptsText(text: string): boolean;
   acceptsUtf8(bytes: Uint8Array | readonly number[]): boolean;
   append(state: JsonPrefixState, text: string): JsonPrefixState;
-  appendUtf8(
-    state: JsonUtf8PrefixState,
-    bytes: Uint8Array,
-  ): JsonUtf8PrefixState;
-  viable(state: JsonUtf8PrefixState): boolean;
-  accepting(state: JsonUtf8PrefixState): boolean;
-  /** A conservative key for open strings whose content cannot affect a mask. */
-  maskEquivalenceKey(state: JsonUtf8PrefixState): string | undefined;
   finish(state: JsonPrefixState): boolean;
   /** A snapshot of parser work, intended for diagnostics and benchmarks. */
   instrumentation(): Readonly<JsonParserInstrumentation>;
@@ -1922,7 +1916,7 @@ class SchemaPrefixParser {
     if (this.input[this.position] === "-") {
       this.position += 1;
       if (this.position === this.input.length)
-        throw new PrefixStop(this.numberPrefixPossible("-", schemas));
+        throw new PrefixStop(this.numberPrefixPossible(schemas));
     }
     if (this.input[this.position] === "0") {
       this.position += 1;
@@ -1935,9 +1929,7 @@ class SchemaPrefixParser {
     if (this.input[this.position] === ".") {
       this.position += 1;
       if (this.position === this.input.length)
-        throw new PrefixStop(
-          this.numberPrefixPossible(this.input.slice(start), schemas),
-        );
+        throw new PrefixStop(this.numberPrefixPossible(schemas));
       if (!this.isDigit(this.input[this.position])) throw new PrefixStop(false);
       while (this.isDigit(this.input[this.position])) this.position += 1;
     }
@@ -1952,9 +1944,7 @@ class SchemaPrefixParser {
       )
         this.position += 1;
       if (this.position === this.input.length)
-        throw new PrefixStop(
-          this.numberPrefixPossible(this.input.slice(start), schemas),
-        );
+        throw new PrefixStop(this.numberPrefixPossible(schemas));
       if (!this.isDigit(this.input[this.position])) throw new PrefixStop(false);
       while (this.isDigit(this.input[this.position])) this.position += 1;
     }
@@ -1962,7 +1952,7 @@ class SchemaPrefixParser {
     return { kind: "number", value: Number(raw), raw };
   }
 
-  private numberPrefixPossible(raw: string, schemas: SchemaSet): boolean {
+  private numberPrefixPossible(schemas: SchemaSet): boolean {
     const values = finiteSchemaValues(schemas);
     if (values === undefined) return true;
     return values.some((value) => typeof value === "number");
@@ -2063,7 +2053,7 @@ class SchemaPrefixParser {
       const key = this.propertyName(schemas, entries);
       if (entries.some((entry) => entry.key === key))
         throw new PrefixStop(false);
-      const childSchemas = this.propertySchemas(schemas, key, entries);
+      const childSchemas = this.propertySchemas(schemas, key);
       if (!childSchemas) throw new PrefixStop(false);
       this.space();
       this.separator(this.guidance.keySeparator);
@@ -2174,11 +2164,7 @@ class SchemaPrefixParser {
     );
   }
 
-  private propertySchemas(
-    schemas: SchemaSet,
-    key: string,
-    entries: Array<{ key: string; node: JsonNode }>,
-  ): SchemaSet | null {
+  private propertySchemas(schemas: SchemaSet, key: string): SchemaSet | null {
     const result: SchemaSet = [];
     for (const schema of schemas) {
       if (typeof schema === "boolean") continue;
@@ -2943,7 +2929,6 @@ function beginIncrementalValue(
   machine: IncrementalMachine,
   character: string,
   schemas: SchemaSet,
-  references: Map<string, Schema>,
   maxDepth: number,
 ): IncrementalMachine {
   const kind =
@@ -3263,13 +3248,7 @@ function feedIncrementalCharacter(
         machine,
         "Array cannot contain another item",
       );
-    return beginIncrementalValue(
-      machine,
-      character,
-      schemas,
-      references,
-      maxDepth,
-    );
+    return beginIncrementalValue(machine, character, schemas, maxDepth);
   }
   if (
     machine.expectation === "objectKeyOrEnd" ||
@@ -3314,13 +3293,7 @@ function feedIncrementalCharacter(
     const schemas = incrementalPropertySchemas(frame.schemas, frame.key!);
     return schemas === null
       ? invalidateIncremental(machine, "Object property is not allowed")
-      : beginIncrementalValue(
-          machine,
-          character,
-          schemas,
-          references,
-          maxDepth,
-        );
+      : beginIncrementalValue(machine, character, schemas, maxDepth);
   }
   if (
     machine.expectation === "arrayAfterValue" ||
@@ -3368,13 +3341,7 @@ function feedIncrementalCharacter(
       separatorOffset: 0,
     };
   }
-  return beginIncrementalValue(
-    machine,
-    character,
-    rootSchemas,
-    references,
-    maxDepth,
-  );
+  return beginIncrementalValue(machine, character, rootSchemas, maxDepth);
 }
 
 function feedIncrementalByte(

@@ -6,6 +6,7 @@ import type {
   TokenizerConfig,
   TokenizerHandle,
 } from "./engine/core.ts";
+
 import {
   createHandleRuntime,
   normalizeTokenizerConfig,
@@ -13,6 +14,16 @@ import {
   type TokenizerSource,
 } from "./runtime-core.ts";
 import { extractLLGuidanceTokenizerConfig } from "./tokenizer_bridge.ts";
+
+const EMPTY_MASK_INSTRUMENTATION: Readonly<MaskCacheInstrumentation> =
+  Object.freeze({
+    trieNodesVisited: 0,
+    sharedJsonMaskCacheHits: 0,
+    sharedJsonMaskCacheMisses: 0,
+    sharedJsonMaskCacheEntries: 0,
+    sharedJsonMaskCacheWords: 0,
+    sharedJsonMaskCacheEvictions: 0,
+  });
 
 type Options = Record<string, unknown>;
 type GrammarConfig = Options | null | undefined;
@@ -63,6 +74,7 @@ export interface LLInterpreterInstance extends InterpreterHandle {
 }
 
 export interface LLMatcherInstance {
+  maskInstrumentation(): Readonly<MaskCacheInstrumentation>;
   compute_bitmask(): Uint8Array;
   compute_logit_bias(): Uint8Array;
   consume_token(sampledToken: number): boolean;
@@ -269,7 +281,9 @@ export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
     }
 
     maskInstrumentation(): Readonly<MaskCacheInstrumentation> {
-      return this._interpreter.maskInstrumentation();
+      return (
+        this._interpreter.maskInstrumentation?.() ?? EMPTY_MASK_INSTRUMENTATION
+      );
     }
 
     free(): void {
@@ -317,6 +331,12 @@ export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
 
     static grammar_from_regex(regex: string): string {
       return mod.grammarFromRegex(regex);
+    }
+
+    maskInstrumentation(): Readonly<MaskCacheInstrumentation> {
+      return (
+        this._interpreter.maskInstrumentation?.() ?? EMPTY_MASK_INSTRUMENTATION
+      );
     }
 
     static validate_grammar(
