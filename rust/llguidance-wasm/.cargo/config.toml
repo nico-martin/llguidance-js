@@ -1,6 +1,0 @@
-# SIMD128 is supported by all evergreen browsers and Node >= 16.
-[target.wasm32-unknown-unknown]
-rustflags = [
-  '--cfg', 'getrandom_backend="custom"',
-  '-C', 'target-feature=+simd128,+bulk-memory',
-]

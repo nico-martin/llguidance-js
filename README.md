@@ -1,9 +1,8 @@
 # llguidance
 
-Browser and Node.js WASM bindings for [`guidance-ai/llguidance`](https://github.com/guidance-ai/llguidance).
+Pure TypeScript constrained decoding for browsers and Node.js, based on [`guidance-ai/llguidance`](https://github.com/guidance-ai/llguidance).
 
-This package loads a bundled WebAssembly build of llguidance and exposes a small JavaScript runtime for constrained decoding with `json_object` and `json_schema` response formats.
-It also supports regex constraints.
+The dependency-free runtime supports regex constraints, `json_object`, and a practical JSON Schema 2020-12 profile. It does not claim full JSON Schema conformance or complete upstream llguidance API parity.
 
 ## Install
 
@@ -11,20 +10,15 @@ It also supports regex constraints.
 pnpm add llguidance
 ```
 
-## Basic Usage
+## Usage
 
 ```js
 import { loadBundledLLGuidance } from "llguidance";
 
 const runtime = await loadBundledLLGuidance();
-
-// Use the same tokenizer that your LLM uses for inference.
-const tokenizer = modelTokenizer;
-
 const interpreter = runtime.createInterpreter({
-  // This can be a Hugging Face tokenizer object, a Transformers.js tokenizer,
-  // or a tokenizer returned by runtime.createTokenizer().
-  tokenizer,
+  // Use the exact tokenizer and token IDs used by the model.
+  tokenizer: modelTokenizer,
   response_format: {
     type: "json_schema",
     json_schema: {
@@ -38,127 +32,65 @@ const interpreter = runtime.createInterpreter({
   },
 });
 
-const { mask, vocabSize } = interpreter.computeMask();
-
-// Apply `mask` to your model logits, sample an allowed token, then commit it.
-const tokenId = 0;
-const result = interpreter.commitToken(tokenId);
+const result = interpreter.computeMask();
+if ("mask" in result) {
+  // Apply result.mask to the model logits and sample an allowed token.
+  const tokenId = sampleToken(result.mask, result.vocabSize);
+  interpreter.commitToken(tokenId);
+}
 ```
 
-### Browser Bundlers And WASM URLs
+Each interpreter represents one mutable generation stream. Use separate interpreters for batch rows, beams, or forks.
 
-The browser build uses a bundler-resolved WASM URL internally, so Vite/Rollup-style apps can usually call `loadBundledLLGuidance()` directly.
+## Feature Bundles
 
-If your bundler needs explicit asset wiring, pass the WASM source yourself:
+The root entry includes both regex and JSON Schema engines plus the Python-style compatibility API. Applications that need only one constraint family can use a static feature subpath:
 
 ```js
-import { loadBundledLLGuidance } from "llguidance";
-import wasmUrl from "llguidance/wasm/llguidance_wasm_bg.wasm?url";
+import { loadRegexGuidance } from "llguidance/regex";
 
-const runtime = await loadBundledLLGuidance({ wasm: wasmUrl });
+const runtime = await loadRegexGuidance();
 ```
-
-`wasm` may be a `string`, `URL`, `Request`, `Response`, `BufferSource`, or `WebAssembly.Module` accepted by wasm-bindgen's initializer. `wasmUrl` is also accepted as an alias for compatibility.
-
-You can also load the wasm-bindgen JS factory yourself, including from a blob URL, CDN URL, service worker cache, or other application-managed source:
 
 ```js
-import { loadBundledLLGuidance } from "llguidance";
+import { loadJsonGuidance } from "llguidance/json-schema";
 
-const [factorySource, wasmBytes] = await Promise.all([
-  caches.open("models").then(async (cache) => (await cache.match("/llguidance_wasm.js")).text()),
-  caches.open("models").then(async (cache) => (await cache.match("/llguidance_wasm_bg.wasm")).arrayBuffer()),
-]);
-
-const wasmFactoryUrl = URL.createObjectURL(
-  new Blob([factorySource], { type: "text/javascript" }),
-);
-
-const runtime = await loadBundledLLGuidance({
-  wasmFactoryUrl,
-  wasm: wasmBytes,
-});
+const runtime = await loadJsonGuidance();
 ```
-
-If you already have the factory module namespace, pass it directly:
 
 ```js
-import { loadBundledLLGuidance } from "llguidance";
-import * as wasmFactory from "llguidance/wasm/llguidance_wasm.js";
+import { loadGrammarGuidance } from "llguidance/grammar";
 
-const runtime = await loadBundledLLGuidance({
-  wasmFactory,
-  wasm: wasmBytesOrUrl,
-});
+const runtime = await loadGrammarGuidance();
+const interpreter = runtime.createInterpreter({ tokenizer, grammar: lark });
 ```
 
-The tokenizer must be the same tokenizer used by the LLM during inference. llguidance constrains model token ids, so its vocabulary must match the model vocabulary exactly.
+The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`; the grammar entry accepts the documented practical Lark subset. These are independent static bundles with no dynamic imports, so excluded engines are not downloaded or parsed.
+
+## Response Formats
+
+```js
+{
+  type: "json_object";
+}
+```
+
+```js
+{ type: "json_schema", json_schema: schema }
+```
+
+```js
+{ type: "regex", regex: "[a-z]+" }
+```
+
+See [JSON_SCHEMA_PROFILE.md](docs/JSON_SCHEMA_PROFILE.md) and [REGEX_SUPPORT.md](docs/REGEX_SUPPORT.md) for exact support.
 
 ## Tokenizers
 
-If you already have a compatible tokenizer object, pass it directly to `createInterpreter`:
+The tokenizer vocabulary must match the model vocabulary exactly. Pass a compatible tokenizer object directly or create one from raw token bytes:
 
 ```js
-const interpreter = runtime.createInterpreter({
-  tokenizer,
-  response_format: { type: "json_object" },
-});
-```
-
-The runtime will try to extract the raw token byte vocabulary from common Hugging Face tokenizer shapes, including Transformers.js tokenizer JSON and `getVocab()`/`tokenToId()` style APIs.
-
-### Hugging Face Tokenizers
-
-Use the exact tokenizer instance used by your model. The token ids sampled by the LLM are the ids passed to `interpreter.commitToken(tokenId)`, so the tokenizer vocabulary must match the model vocabulary exactly.
-
-With Transformers.js, pass the loaded tokenizer directly. Transformers.js tokenizers are callable objects; llguidance supports that shape and will inspect the tokenizer's metadata without requiring a wrapper/facade.
-
-```js
-import { AutoTokenizer } from "@huggingface/transformers";
-import { loadBundledLLGuidance } from "llguidance";
-
-const tokenizer = await AutoTokenizer.from_pretrained("Xenova/gpt2");
-const runtime = await loadBundledLLGuidance();
-
-const interpreter = runtime.createInterpreter({
-  tokenizer,
-  response_format: { type: "json_object" },
-});
-```
-
-The bridge looks for common Transformers.js fields and methods on the callable tokenizer, including `_tokenizerJSON`, `get_vocab()`, `token_to_id()`, `eos_token_id`, `bos_token_id`, and `all_special_ids`.
-
-With `@huggingface/tokenizers`, pass the tokenizer object if it exposes tokenizer JSON, `getVocab()`, or `idToToken()`/`getVocabSize()`:
-
-```js
-import { Tokenizer } from "@huggingface/tokenizers";
-import { loadBundledLLGuidance } from "llguidance";
-
-const tokenizer = await Tokenizer.fromFile("tokenizer.json");
-const runtime = await loadBundledLLGuidance();
-
-const interpreter = runtime.createInterpreter({
-  tokenizer,
-  response_format: {
-    type: "json_schema",
-    json_schema: {
-      type: "object",
-      properties: {
-        answer: { type: "string" },
-      },
-      required: ["answer"],
-      additionalProperties: false,
-    },
-  },
-});
-```
-
-Internally, llguidance needs raw token bytes, not decoded text. The bridge handles common Hugging Face formats, including byte-level BPE tokens like `Ġword`, SentencePiece-style tokens like `▁word`, byte fallback tokens like `<0xFF>`, and added/special tokens.
-
-If automatic extraction fails, build the tokenizer config yourself and pass it to `runtime.createTokenizer()`:
-
-```js
-const llgTokenizer = runtime.createTokenizer({
+const tokenizer = runtime.createTokenizer({
   tokens: rawTokenBytesById,
   eos_token_id,
   bos_token_id,
@@ -166,117 +98,44 @@ const llgTokenizer = runtime.createTokenizer({
 });
 ```
 
-You can also create an llguidance tokenizer explicitly:
-
-```js
-const llgTokenizer = runtime.createTokenizer({
-  // Each entry must be the raw byte representation for the token id at that index.
-  tokens: [
-    [123], // "{"
-    [125], // "}"
-    [34],  // '"'
-    [58],  // ":"
-    [44],  // ","
-  ],
-  eos_token_id: 4,
-});
-
-const interpreter = runtime.createInterpreter({
-  tokenizer: llgTokenizer,
-  response_format: { type: "json_object" },
-});
-```
-
-## JSON Object Mode
-
-```js
-const interpreter = runtime.createInterpreter({
-  tokenizer,
-  response_format: { type: "json_object" },
-});
-```
-
-## Regex Mode
-
-Regex constraints use Rust regex syntax as accepted by upstream llguidance.
-
-```js
-const interpreter = runtime.createInterpreter({
-  tokenizer,
-  response_format: {
-    type: "regex",
-    regex: "[a-z]+",
-  },
-});
-```
+An EOS token ID is required for custom token arrays. See [TOKENIZERS.md](docs/TOKENIZERS.md) for supported tokenizer shapes and byte formats.
 
 ## API
 
-### `loadBundledLLGuidance()`
+- `loadBundledLLGuidance()` returns the cached runtime.
+- `loadRegexGuidance()`, `loadJsonGuidance()`, and `loadGrammarGuidance()` return cached lean feature runtimes.
+- `runtime.createTokenizer(config)` creates a tokenizer handle.
+- `runtime.createInterpreter(config)` creates one constrained-decoding stream.
+- `interpreter.computeMask()` returns `{ mask, vocabSize }` or
+  `{ stop: true, reason: "accepted" | "dead_end" }`.
+- Interpreter configs accept a `limits` object with `maxTokens`,
+  `maxOutputBytes`, `maxRegexStates`, `maxRegexRepeat`, `maxSchemaDepth`, and
+  `maxJsonDepth` safety bounds.
+- `interpreter.commitToken(tokenId)` advances the stream.
+- Tokenizer, interpreter, and matcher handles expose idempotent `free()` and `dispose()`.
 
-Loads the WASM module and returns a runtime object.
+The runtime also exposes selected Python-style classes and helpers. See [API_MAPPING.md](docs/API_MAPPING.md).
 
-Options:
+## Documentation
 
-- `wasm`: WASM binary source passed to wasm-bindgen, such as a URL, `Response`, bytes, or `WebAssembly.Module`.
-- `wasmUrl`: alias for `wasm`.
-- `wasmFactory`: wasm-bindgen JS factory module namespace, promise, or function returning one.
-- `wasmFactoryUrl`: URL for the wasm-bindgen JS factory module, including `blob:` URLs.
+- [JSON Schema profile](docs/JSON_SCHEMA_PROFILE.md)
+- [Regex support](docs/REGEX_SUPPORT.md)
+- [Grammar support](docs/GRAMMAR_SUPPORT.md)
+- [Tokenizers](docs/TOKENIZERS.md)
+- [Worker integration](docs/WORKERS.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Compatibility with upstream llguidance](docs/COMPATIBILITY.md)
+- [Python-to-JavaScript API mapping](docs/API_MAPPING.md)
+- [Performance](docs/PERFORMANCE.md)
+- [Development](docs/DEVELOPMENT.md)
 
-### `runtime.createTokenizer(config)`
-
-Creates an llguidance tokenizer environment.
-
-Supported config fields:
-
-- `tokens`: array of raw token byte arrays, indexed by token id.
-- `eos_token_id` or `eosTokenId`: end-of-sequence token id.
-- `bos_token_id` or `bosTokenId`: optional beginning-of-sequence token id.
-- `special_token_ids` or `specialTokenIds`: optional list of special token ids.
-
-### `runtime.createInterpreter(config)`
-
-Creates a constrained decoding interpreter.
-
-Supported config fields:
-
-- `tokenizer`: tokenizer returned by `createTokenizer`, or a compatible existing tokenizer object.
-- `response_format`: `{ type: "json_object" }`, `{ type: "json_schema", json_schema }`, or `{ type: "regex", regex }`.
-
-### `interpreter.computeMask()`
-
-Computes the next-token constraint.
-
-Returns one of:
-
-- `{ mask, vocabSize }`, where `mask` is a `Uint32Array` bitset.
-- `{ stop: true }` when the grammar is complete.
-- `{ backtrack, ffTokens }` when llguidance returns an unconditional fast-forward splice.
-
-### `interpreter.commitToken(tokenId)`
-
-Commits the sampled token and advances the grammar state.
-
-Returns `{ stop, backtrack, ffTokens }`.
+The root entry intentionally does not include Lark support. Use the optional `llguidance/grammar` entry for its documented subset, or upstream `llguidance` when full grammar compatibility is required.
 
 ## Development
 
-Build a fast development WASM artifact:
-
 ```bash
-pnpm run build:llguidance-wasm:dev
+pnpm install
+pnpm dev
 ```
 
-Build the release artifact and stage the npm package in `dist/`:
-
-```bash
-pnpm run build:dist
-```
-
-Publish with an npm one-time password:
-
-```bash
-pnpm run publish <otp> [patch|minor|major]
-```
-
-The publish script bumps the root `package.json` version, rebuilds `dist/`, and publishes the staged package to npm as `llguidance`.
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for build, test, typecheck, distribution, and benchmark commands.
