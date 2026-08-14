@@ -220,6 +220,38 @@ test("cached masks are isolated and invalidate only after state changes", () => 
   });
 });
 
+test("validates ranked candidates without advancing interpreter state", () => {
+  const tokenizer = llguidance.createTokenizer({
+    tokens: [[97], [98], [97, 98], [120], []],
+    eos_token_id: 4,
+  });
+  const interpreter = llguidance.createInterpreter({
+    tokenizer,
+    response_format: { type: "regex", regex: "ab" },
+  });
+  const target = new Uint8Array(5);
+
+  assert.equal(
+    interpreter.validateCandidates(Uint32Array.of(0, 3, 2, 0, 99), target),
+    target,
+  );
+  assert.deepEqual([...target], [1, 0, 1, 1, 0]);
+  interpreter.commitToken(0);
+  assert.deepEqual(
+    [...interpreter.validateCandidates(Uint32Array.of(0, 1, 4))],
+    [0, 1, 0],
+  );
+  interpreter.commitToken(1);
+  assert.deepEqual(
+    [...interpreter.validateCandidates(Uint32Array.of(1, 4))],
+    [0, 1],
+  );
+  assert.throws(
+    () => interpreter.validateCandidates(Uint32Array.of(0, 1), new Uint8Array(1)),
+    /at least 2 bytes/,
+  );
+});
+
 test("distinguishes dead ends from successful completion", () => {
   const tokenizer = llguidance.createTokenizer({
     tokens: [[120], []],

@@ -105,6 +105,8 @@ export interface LLGuidanceCommitResult {
 
 export interface LLGuidanceInterpreterHandle extends Disposable {
   computeMask(): LLGuidanceMaskResult;
+  computeMaskInto(target: Uint32Array): LLGuidanceMaskResult;
+  validateCandidates(tokenIds: Uint32Array, target?: Uint8Array): Uint8Array;
   commitToken(sampledToken: number): LLGuidanceCommitResult;
   clone(): LLGuidanceInterpreterHandle;
   rollback(count: number): void;

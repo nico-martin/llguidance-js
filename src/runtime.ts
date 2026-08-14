@@ -247,6 +247,13 @@ export function createLLGuidanceRuntime(mod: EngineModule): LLGuidanceRuntime {
       return this._interpreter.computeMaskInto(target);
     }
 
+    validateCandidates(
+      tokenIds: Uint32Array,
+      target?: Uint8Array,
+    ): Uint8Array {
+      return this._interpreter.validateCandidates(tokenIds, target);
+    }
+
     commitToken(sampledToken: number) {
       return this._interpreter.commitToken(sampledToken);
     }

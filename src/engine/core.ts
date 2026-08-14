@@ -153,6 +153,10 @@ export interface TokenizerHandle {
 export interface InterpreterHandle {
   computeMask(): MaskResult;
   computeMaskInto(target: Uint32Array): MaskResult;
+  validateCandidates(
+    tokenIds: Uint32Array,
+    target?: Uint8Array,
+  ): Uint8Array;
   commitToken(token: number): CommitResult;
   clone(): InterpreterHandle;
   rollback(count: number): void;
@@ -360,6 +364,45 @@ class CoreLLGuidanceInterpreter {
     return { stop: true, reason: result.reason };
   }
 
+  validateCandidates(
+    tokenIds: Uint32Array,
+    target = new Uint8Array(tokenIds.length),
+  ): Uint8Array {
+    this.assertLive();
+    if (!(tokenIds instanceof Uint32Array)) {
+      throw new TypeError("candidate token IDs must be a Uint32Array");
+    }
+    if (!(target instanceof Uint8Array)) {
+      throw new TypeError("candidate target must be a Uint8Array");
+    }
+    if (target.length < tokenIds.length) {
+      throw new RangeError(
+        `candidate target needs at least ${tokenIds.length} bytes`,
+      );
+    }
+    target.fill(0, 0, tokenIds.length);
+    if (this.stopped) return target;
+
+    const vocabSize = this.tokenizer.vocabSize();
+    if (this.maskCache !== null) {
+      if (!("mask" in this.maskCache)) return target;
+      for (let index = 0; index < tokenIds.length; index += 1) {
+        const token = tokenIds[index];
+        if (token < vocabSize) {
+          target[index] =
+            (this.maskCache.mask[token >>> 5] >>> (token & 31)) & 1;
+        }
+      }
+      return target;
+    }
+
+    for (let index = 0; index < tokenIds.length; index += 1) {
+      const token = tokenIds[index];
+      if (token < vocabSize && this.candidateAllowed(token)) target[index] = 1;
+    }
+    return target;
+  }
+
   commitToken(token: number): { stop: boolean; backtrack: 0; ffTokens: [] } {
     this.assertLive();
     const vocabSize = this.tokenizer.vocabSize();
@@ -451,21 +494,36 @@ class CoreLLGuidanceInterpreter {
     if (!Number.isInteger(maxTokens) || maxTokens < 0) {
       throw new RangeError("maxTokens must be a non-negative integer");
     }
+    if (maxTokens === 0) return [];
+    const first = this.computeMaskCached(this.tokenizer.vocabSize());
+    if (!("mask" in first)) return [];
+    const firstToken = singleAllowedToken(
+      first.mask,
+      first.vocabSize,
+      this.tokenizer.eosToken(),
+    );
+    if (firstToken === null) return [];
+
     const branch = this.clone();
     const result: number[] = [];
-    for (let index = 0; index < maxTokens; index += 1) {
-      const next = branch.computeMask();
-      if (!("mask" in next)) break;
-      const token = singleAllowedToken(
-        next.mask,
-        next.vocabSize,
-        this.tokenizer.eosToken(),
-      );
-      if (token === null) break;
-      result.push(token);
-      branch.commitToken(token);
+    try {
+      result.push(firstToken);
+      branch.commitToken(firstToken);
+      for (let index = 1; index < maxTokens; index += 1) {
+        const next = branch.computeMaskCached(this.tokenizer.vocabSize());
+        if (!("mask" in next)) break;
+        const token = singleAllowedToken(
+          next.mask,
+          next.vocabSize,
+          this.tokenizer.eosToken(),
+        );
+        if (token === null) break;
+        result.push(token);
+        branch.commitToken(token);
+      }
+    } finally {
+      branch.free();
     }
-    branch.free();
     return result;
   }
 
@@ -700,6 +758,21 @@ class CoreLLGuidanceInterpreter {
     this.pendingToken = token;
     this.pendingState = candidate;
     return true;
+  }
+
+  private candidateAllowed(token: number): boolean {
+    if (token === this.tokenizer.eosToken()) return this.accepting();
+    if (this.tokenizer.isSpecial(token)) return false;
+    const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    if (!this.withinGenerationLimits(bytes.length)) return false;
+    if (this.engine.kind === "regex") {
+      return this.engine.compiled.viable(
+        this.engine.compiled.advance(this.engine.state, bytes),
+      );
+    }
+    return this.engine.compiled.viable(
+      this.engine.compiled.appendUtf8(this.engine.state, bytes),
+    );
   }
 
   private computeMaskCached(vocabSize: number): MaskResult {
