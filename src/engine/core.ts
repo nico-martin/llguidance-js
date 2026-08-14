@@ -117,8 +117,8 @@ type TokenizerData = {
   /** Normal tokens that can always extend an unconstrained open JSON string. */
   readonly openStringSafeMask: Uint32Array;
   readonly openStringSafeCount: number;
-  /** Normal tokens that need a parser transition in an open JSON string. */
-  readonly openStringExceptionalTokens: readonly number[];
+  /** Prefix-sharing trie for normal tokens that need a parser transition in an open JSON string. */
+  readonly openStringExceptionalTrie: TokenTrieNode;
 };
 
 export type StopReason = "accepted" | "dead_end";
@@ -596,12 +596,32 @@ class CoreLLGuidanceInterpreter {
     if (this.canUseOpenStringFastPath(data, compiled, state, semantic)) {
       mask.set(data.openStringSafeMask);
       let eligible = data.openStringSafeCount;
-      for (const token of data.openStringExceptionalTokens) {
-        const candidate = compiled.appendUtf8(state, data.tokenBytes[token]);
-        if (!compiled.viable(candidate)) continue;
-        setMaskBit(mask, token);
-        eligible += 1;
+      const nodes = this.trieNodes;
+      const states = this.trieStates;
+      let stackLength = 1;
+      nodes[0] = data.openStringExceptionalTrie;
+      states[0] = state;
+      while (stackLength !== 0) {
+        stackLength -= 1;
+        const node = nodes[stackLength];
+        const currentState = states[stackLength] as JsonEngineState;
+        for (const token of node.terminalTokenIds) {
+          setMaskBit(mask, token);
+          eligible += 1;
+        }
+        for (let index = 0; index < node.childNodes.length; index += 1) {
+          const candidate = compiled.appendUtf8(
+            currentState,
+            singleBytes[node.childBytes[index]],
+          );
+          if (!compiled.viable(candidate)) continue;
+          nodes[stackLength] = node.childNodes[index];
+          states[stackLength] = candidate;
+          stackLength += 1;
+        }
       }
+      nodes.length = 0;
+      states.length = 0;
       return eligible;
     }
     let eligible = 0;
@@ -1135,7 +1155,10 @@ function normalizeTokenBytes(
   return Uint8Array.from(values);
 }
 
-function buildTokenTrie(tokens: readonly Uint8Array[]): TokenTrieNode {
+function buildTokenTrie(
+  tokens: readonly Uint8Array[],
+  tokenIds?: readonly number[],
+): TokenTrieNode {
   const makeNode = (): TokenTrieNode => ({
     children: new Map(),
     childBytes: [],
@@ -1143,7 +1166,9 @@ function buildTokenTrie(tokens: readonly Uint8Array[]): TokenTrieNode {
     terminalTokenIds: [],
   });
   const root = makeNode();
-  tokens.forEach((bytes, tokenId) => {
+  const ids = tokenIds ?? tokens.map((_, tokenId) => tokenId);
+  for (const tokenId of ids) {
+    const bytes = tokens[tokenId];
     let node = root;
     for (const byte of bytes) {
       let child = node.children!.get(byte);
@@ -1154,7 +1179,7 @@ function buildTokenTrie(tokens: readonly Uint8Array[]): TokenTrieNode {
       node = child;
     }
     node.terminalTokenIds.push(tokenId);
-  });
+  }
   const pending = [root];
   while (pending.length !== 0) {
     const node = pending.pop()!;
@@ -1185,7 +1210,7 @@ function openStringTokenData(
   special: ReadonlySet<number>,
 ): Pick<
   TokenizerData,
-  "openStringSafeMask" | "openStringSafeCount" | "openStringExceptionalTokens"
+  "openStringSafeMask" | "openStringSafeCount" | "openStringExceptionalTrie"
 > {
   const openStringSafeMask = new Uint32Array(Math.ceil(tokens.length / 32));
   const openStringExceptionalTokens: number[] = [];
@@ -1203,7 +1228,10 @@ function openStringTokenData(
   return {
     openStringSafeMask,
     openStringSafeCount,
-    openStringExceptionalTokens,
+    openStringExceptionalTrie: buildTokenTrie(
+      tokens,
+      openStringExceptionalTokens,
+    ),
   };
 }
 

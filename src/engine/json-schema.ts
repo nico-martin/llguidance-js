@@ -2561,18 +2561,19 @@ function incrementalPropertyNameSchemas(schemas: SchemaSet): SchemaSet {
   return result.length === 0 ? [true] : result;
 }
 
-function incrementalAvailableProperties(
+function incrementalHasAvailableProperty(
   schemas: SchemaSet,
   entries: ReadonlyArray<{ key: string; node: JsonNode }>,
-): string[] {
-  const used = new Set(entries.map(({ key }) => key));
-  const result = new Set<string>();
+  prefix = "",
+): boolean {
   for (const schema of schemas) {
     if (typeof schema === "boolean") continue;
-    for (const key of compiledSchemaState(schema).properties.keys())
-      if (!used.has(key)) result.add(key);
+    for (const key of compiledSchemaState(schema).properties.keys()) {
+      if (key.startsWith(prefix) && !entries.some((entry) => entry.key === key))
+        return true;
+    }
   }
-  return [...result];
+  return false;
 }
 
 function incrementalAdditionalPropertiesAllowed(schemas: SchemaSet): boolean {
@@ -2587,28 +2588,32 @@ function incrementalPropertyPrefixPossible(
   entries: ReadonlyArray<{ key: string; node: JsonNode }>,
   prefix: string,
 ): boolean {
-  const names = incrementalPropertyNameSchemas(schemas);
-  const finite = finiteSchemaValues(names);
-  if (
-    finite !== undefined &&
-    !finite.some(
-      (candidate) =>
-        typeof candidate === "string" && candidate.startsWith(prefix),
-    )
-  )
-    return false;
-  for (const schema of names)
+  const hasPropertyNameSchema = schemas.some(
+    (schema) =>
+      typeof schema !== "boolean" && schema.propertyNames !== undefined,
+  );
+  if (hasPropertyNameSchema) {
+    const names = incrementalPropertyNameSchemas(schemas);
+    const finite = finiteSchemaValues(names);
     if (
-      typeof schema !== "boolean" &&
-      schema.maxLength !== undefined &&
-      Array.from(prefix).length > (schema.maxLength as number)
+      finite !== undefined &&
+      !finite.some(
+        (candidate) =>
+          typeof candidate === "string" && candidate.startsWith(prefix),
+      )
     )
       return false;
+    for (const schema of names)
+      if (
+        typeof schema !== "boolean" &&
+        schema.maxLength !== undefined &&
+        Array.from(prefix).length > (schema.maxLength as number)
+      )
+        return false;
+  }
   return (
     incrementalAdditionalPropertiesAllowed(schemas) ||
-    incrementalAvailableProperties(schemas, entries).some((name) =>
-      name.startsWith(prefix),
-    )
+    incrementalHasAvailableProperty(schemas, entries, prefix)
   );
 }
 
@@ -2679,7 +2684,7 @@ function incrementalObjectCanAdd(
     return false;
   return (
     incrementalAdditionalPropertiesAllowed(schemas) ||
-    incrementalAvailableProperties(schemas, entries).length !== 0
+    incrementalHasAvailableProperty(schemas, entries)
   );
 }
 
