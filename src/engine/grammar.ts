@@ -1,4 +1,5 @@
 import type { GrammarCapture, GuidanceLimits } from "./core.ts";
+import { compileJsonSchema } from "./json-schema.ts";
 import { compileRegex, type CompiledRegex, type RegexState } from "./regex.ts";
 
 type SymbolRef =
@@ -11,6 +12,14 @@ type Rule = {
   capture: boolean;
 };
 type CaptureSpan = Omit<GrammarCapture, "value">;
+type TerminalState = object;
+/** A byte-level matcher: a literal or regex NFA, or a `%json` schema matcher. */
+interface Terminal {
+  readonly initialState: TerminalState;
+  advance(state: TerminalState, bytes: Uint8Array): TerminalState;
+  viable(state: TerminalState): boolean;
+  accepting(state: TerminalState): boolean;
+}
 type Item = {
   rule: Rule;
   dot: number;
@@ -19,7 +28,7 @@ type Item = {
 };
 type Scanner = {
   terminal: number;
-  state: RegexState;
+  state: TerminalState;
   item: Item;
   ignored: boolean;
   start: number;
@@ -55,7 +64,7 @@ class LarkCompiler implements CompiledLark {
   readonly initialState: LarkState;
   private readonly rules: Rule[];
   private readonly rulesByName = new Map<string, Rule[]>();
-  private readonly terminals: CompiledRegex[];
+  private readonly terminals: Terminal[];
   private readonly ignored: number[];
   private readonly decoder = new TextDecoder();
 
@@ -254,20 +263,22 @@ function itemKey(item: Item): string {
 }
 
 class GrammarParser {
-  private readonly terminals: CompiledRegex[] = [];
+  private readonly terminals: Terminal[] = [];
+  private readonly jsonTerminals = new Map<string, number>();
+  private readonly jsonTerminalIds = new Set<number>();
   private readonly definitions = new Map<string, SymbolRef[][]>();
   private readonly ignoredNames: string[] = [];
   private readonly ignoredDirect: number[] = [];
   private synthetic = 0;
-  private readonly regexLimits: GuidanceLimits;
+  private readonly limits: GuidanceLimits;
   private readonly source: string;
 
   constructor(source: string, limits: GuidanceLimits) {
     this.source = source;
-    this.regexLimits = limits;
+    this.limits = limits;
   }
 
-  parse(): { rules: Rule[]; terminals: CompiledRegex[]; ignored: number[] } {
+  parse(): { rules: Rule[]; terminals: Terminal[]; ignored: number[] } {
     const lines = logicalLines(this.source);
     for (const line of lines) this.parseLine(line);
     if (!this.definitions.has("start")) {
@@ -294,7 +305,8 @@ class GrammarParser {
       if (
         alternatives?.length !== 1 ||
         alternatives[0].length !== 1 ||
-        alternatives[0][0].kind !== "terminal"
+        alternatives[0][0].kind !== "terminal" ||
+        this.jsonTerminalIds.has(alternatives[0][0].id)
       ) {
         throw new SyntaxError(
           `unsupported Lark grammar: %ignore ${name} must name one literal or regex terminal`,
@@ -361,7 +373,7 @@ class GrammarParser {
         `unsupported Lark construct: ${line.split(/\s/, 1)[0]}`,
       );
     }
-    const match = /^([A-Za-z_]\w*)\s*:\s*(.*)$/.exec(line);
+    const match = /^([A-Za-z_]\w*)\s*:\s*(.*)$/s.exec(line);
     if (!match) throw new SyntaxError(`unsupported Lark syntax: ${line}`);
     const [, name, body] = match;
     if (this.definitions.has(name)) {
@@ -369,14 +381,47 @@ class GrammarParser {
         `unsupported Lark grammar: duplicate rule ${JSON.stringify(name)}`,
       );
     }
-    this.definitions.set(name, new ExpressionParser(body, this).parse());
+    this.definitions.set(
+      name,
+      new ExpressionParser(body, this, TERMINAL_NAME.test(name)).parse(),
+    );
+  }
+
+  json(schema: unknown): SymbolRef {
+    const key = JSON.stringify(schema);
+    const existing = this.jsonTerminals.get(key);
+    if (existing !== undefined) return { kind: "terminal", id: existing };
+    let compiled: ReturnType<typeof compileJsonSchema>;
+    try {
+      compiled = compileJsonSchema(schema, {
+        maxSchemaDepth: this.limits.maxSchemaDepth,
+        maxJsonDepth: this.limits.maxJsonDepth,
+      });
+    } catch (error) {
+      throw new SyntaxError(
+        `unsupported Lark %json: failed to compile JSON schema: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const id =
+      this.terminals.push({
+        initialState: compiled.initialUtf8,
+        advance: (state, bytes) =>
+          compiled.appendUtf8(state as typeof compiled.initialUtf8, bytes),
+        viable: (state) =>
+          compiled.viable(state as typeof compiled.initialUtf8),
+        accepting: (state) =>
+          compiled.accepting(state as typeof compiled.initialUtf8),
+      }) - 1;
+    this.jsonTerminals.set(key, id);
+    this.jsonTerminalIds.add(id);
+    return { kind: "terminal", id };
   }
 
   terminal(source: string): SymbolRef | null {
     if (source === "") return null;
     let compiled: CompiledRegex;
     try {
-      compiled = compileRegex(source, this.regexLimits);
+      compiled = compileRegex(source, this.limits);
     } catch (error) {
       throw new SyntaxError(
         `unsupported Lark regex terminal: ${error instanceof Error ? error.message : String(error)}`,
@@ -419,10 +464,12 @@ class ExpressionParser {
   private index = 0;
   private readonly source: string;
   private readonly grammar: GrammarParser;
+  private readonly inTerminal: boolean;
 
-  constructor(source: string, grammar: GrammarParser) {
+  constructor(source: string, grammar: GrammarParser, inTerminal = false) {
     this.source = source;
     this.grammar = grammar;
+    this.inTerminal = inTerminal;
   }
 
   parse(stop = ""): SymbolRef[][] {
@@ -458,6 +505,8 @@ class ExpressionParser {
     const char = this.peek();
     if (char === '"') atom = this.quoted();
     else if (char === "/") atom = this.regex();
+    else if (char === "%" && JSON_KEYWORD.test(this.source.slice(this.index)))
+      atom = this.json();
     else if (char === "(") {
       this.index++;
       atom = this.grammar.group(this.parse(")"));
@@ -497,6 +546,28 @@ class ExpressionParser {
     this.fail("unterminated string literal", start);
   }
 
+  private json(): SymbolRef {
+    const keyword = this.index;
+    if (this.inTerminal)
+      this.fail("%json literals cannot be used in terminals", keyword);
+    this.index += "%json".length;
+    this.space();
+    const start = this.index;
+    const end = jsonValueEnd(this.source, start);
+    if (end === -1) this.fail("unterminated %json value", keyword);
+    let schema: unknown;
+    try {
+      schema = JSON.parse(this.source.slice(start, end));
+    } catch (error) {
+      this.fail(
+        `invalid %json value: ${error instanceof Error ? error.message : String(error)}`,
+        start,
+      );
+    }
+    this.index = end;
+    return this.grammar.json(schema);
+  }
+
   private regex(): SymbolRef {
     const start = ++this.index;
     let escaped = false;
@@ -510,7 +581,7 @@ class ExpressionParser {
           const regex = this.source.slice(start, this.index++);
           if (/^[A-Za-z]/.test(this.peek() ?? ""))
             this.fail("regex flags are unsupported");
-          return this.grammar.terminal(regex)!;
+          return this.grammar.terminal(unescapeSlashes(regex))!;
         }
       }
       escaped = !escaped && char === "\\";
@@ -537,10 +608,14 @@ class ExpressionParser {
 
 function logicalLines(source: string): string[] {
   const result: string[] = [];
+  let openJson = false;
   for (const original of source.split(/\r?\n/)) {
     const line = stripComment(original).trim();
     if (!line) continue;
-    if (line.startsWith("|")) {
+    if (openJson) {
+      // A multi-line %json value continues the logical line that opened it.
+      result[result.length - 1] += `\n${line}`;
+    } else if (line.startsWith("|")) {
       if (result.length === 0 || result.at(-1)!.startsWith("%")) {
         throw new SyntaxError(
           "unsupported Lark syntax: alternative without a rule",
@@ -548,8 +623,87 @@ function logicalLines(source: string): string[] {
       }
       result[result.length - 1] += ` ${line}`;
     } else result.push(line);
+    openJson = hasOpenJson(result.at(-1)!);
   }
   return result;
+}
+
+const TERMINAL_NAME = /^_?[A-Z][A-Z0-9_]*$/;
+const JSON_KEYWORD = /^%json(?![\w])/;
+
+/** Whether a logical line ends inside a `%json` value. */
+function hasOpenJson(line: string): boolean {
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index];
+    if (char === '"' || char === "/") {
+      index = skipDelimited(line, index, char);
+    } else if (char === "%" && JSON_KEYWORD.test(line.slice(index))) {
+      index += "%json".length;
+      while (/\s/.test(line[index] ?? "")) index++;
+      if (index === line.length) return true;
+      const end = jsonValueEnd(line, index);
+      if (end === -1) return true;
+      index = end;
+    } else index++;
+  }
+  return false;
+}
+
+/** The index after a Lark string literal or regex starting at `start`. */
+function skipDelimited(line: string, start: number, delimiter: string): number {
+  let inClass = false;
+  for (let index = start + 1; index < line.length; index++) {
+    const char = line[index];
+    if (char === "\\") index++;
+    else if (delimiter === "/" && char === "[") inClass = true;
+    else if (delimiter === "/" && char === "]") inClass = false;
+    else if (char === delimiter && !inClass) return index + 1;
+  }
+  return line.length;
+}
+
+/**
+ * The index after the JSON value starting at `start`, or -1 when the source
+ * ends first. Only the value's extent is found here; JSON.parse validates it.
+ */
+function jsonValueEnd(source: string, start: number): number {
+  const first = source[start];
+  if (first === '"') return jsonStringEnd(source, start);
+  if (first !== "{" && first !== "[") {
+    const scalar = /^[A-Za-z0-9.+-]+/.exec(source.slice(start));
+    return scalar ? start + scalar[0].length : start;
+  }
+  let depth = 0;
+  for (let index = start; index < source.length; index++) {
+    const char = source[index];
+    if (char === '"') {
+      index = jsonStringEnd(source, index);
+      if (index === -1) return -1;
+      index--;
+    } else if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") {
+      depth--;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return -1;
+}
+
+function jsonStringEnd(source: string, start: number): number {
+  for (let index = start + 1; index < source.length; index++) {
+    const char = source[index];
+    if (char === "\\") index++;
+    else if (char === '"') return index + 1;
+  }
+  return -1;
+}
+
+/** Lark regexes escape their delimiter as `\/`; the regex engine needs `/`. */
+function unescapeSlashes(regex: string): string {
+  return regex.replace(/\\(.)/gs, (escape, char: string) =>
+    char === "/" ? "/" : escape,
+  );
 }
 
 function stripComment(line: string): string {
@@ -568,5 +722,5 @@ function stripComment(line: string): string {
 }
 
 function regexEscape(value: string): string {
-  return value.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }

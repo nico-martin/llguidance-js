@@ -77,21 +77,28 @@ For the synthetic high-vocabulary JSON semantic-cache check, run:
 node scripts/benchmark-json-mask-cache.mjs
 ```
 
+For grammar masks on a synthetic 1,024-token vocabulary, including tool-call
+grammars with regex and `%json` argument values, run:
+
+```bash
+pnpm run bench:grammar
+```
+
 The benchmark verifies mask correctness and operation-count reduction. Printed wall-clock timings are non-contractual and should only be compared on the same machine and runtime.
 
 For meaningful application benchmarks, use the actual model tokenizer and representative constraints. Include cold first-mask time, masks after commits, repeated cached masks, and memory retained by the tokenizer trie.
 
 ## Bundle Size
 
-The full entry statically includes both engines and the compatibility runtime. `llguidance/regex` and `llguidance/json-schema` are static single-engine bundles; they do not defer code through dynamic imports.
+The full entry statically includes both engines and the compatibility runtime. `llguidance/regex` and `llguidance/json-schema` are static single-engine bundles; `llguidance/grammar` includes the grammar engine with the regex and JSON Schema compilers its terminals and `%json` rules use. They do not defer code through dynamic imports.
 
-Minified browser bundle sizes measured with esbuild 0.25 on July 28, 2026:
+Minified browser bundle sizes measured with esbuild 0.25 on November 15, 2026:
 
 | Entry                    | Minified raw | Minified gzip |
 | ------------------------ | -----------: | ------------: |
-| `llguidance`             |       92,545 |        25,996 |
-| `llguidance/regex`       |       34,612 |        10,708 |
-| `llguidance/json-schema` |       72,551 |        20,050 |
-| `llguidance/grammar`     |       43,361 |        13,241 |
+| `llguidance`             |       98,323 |        27,678 |
+| `llguidance/regex`       |       39,330 |        12,062 |
+| `llguidance/json-schema` |       77,843 |        21,623 |
+| `llguidance/grammar`     |      102,632 |        29,289 |
 
 Source maps are excluded from these values. Run `pnpm run build:dist` followed by `pnpm run size:js` to measure the current minified browser outputs.

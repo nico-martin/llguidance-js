@@ -65,7 +65,7 @@ const runtime = await loadGrammarGuidance();
 const interpreter = runtime.createInterpreter({ tokenizer, grammar: lark });
 ```
 
-The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`; the grammar entry accepts the documented practical Lark subset. These are independent static bundles with no dynamic imports, so excluded engines are not downloaded or parsed.
+The feature runtimes expose `createTokenizer`, `createInterpreter`, and `get_version`. The regex entry accepts only `regex`; the JSON entry accepts `json_object` and `json_schema`; the grammar entry accepts the documented practical Lark subset, including `%json` rules backed by the JSON Schema engine. These are independent static bundles with no dynamic imports, so excluded engines are not downloaded or parsed.
 
 ## Response Formats
 

@@ -21,6 +21,7 @@
     "build:dist": "node scripts/build-dist.mjs",
     "dev": "node scripts/build-js.mjs --watch",
     "bench:mask": "node scripts/benchmark-mask.mjs",
+    "bench:grammar": "node scripts/benchmark-grammar-mask.mjs",
     "compare:browser:build": "node scripts/build-comparison-demo.mjs",
     "compare:browser": "node scripts/serve-comparison-demo.mjs",
     "size:js": "node scripts/report-bundle-sizes.mjs",

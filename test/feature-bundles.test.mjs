@@ -127,6 +127,12 @@ test(
       const gt = grammar.createTokenizer({ tokens: [[97], []], eosTokenId: 1 });
       const gi = grammar.createInterpreter({ tokenizer: gt, grammar: 'start: "a"' });
       if (!("mask" in gi.computeMask())) process.exit(7);
+      const gjt = grammar.createTokenizer({ tokens: [[34], [97], []], eosTokenId: 2 });
+      const gj = grammar.createInterpreter({ tokenizer: gjt, grammar: 'start: "a" %json { "type": "string" }' });
+      const gjMask = gj.computeMask().mask;
+      if ((gjMask[0] & 3) !== 2) process.exit(8);
+      gj.commitToken(1);
+      if ((gj.computeMask().mask[0] & 3) !== 1) process.exit(9);
     `;
     const result = spawnSync(
       process.execPath,
@@ -181,9 +187,10 @@ test(
     for (const bundle of [fullBundle, regexBundle, jsonBundle]) {
       assert.equal(bundle.includes('required rule "start" is missing'), false);
     }
+    // The grammar entry embeds the JSON Schema engine for %json rules.
     assert.equal(
       grammarBundle.includes("Initial JSON whitespace is not allowed"),
-      false,
+      true,
     );
   },
 );
