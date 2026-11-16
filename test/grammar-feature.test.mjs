@@ -60,6 +60,26 @@ test("grammar entry supports alternatives, grouping, and practical quantifiers",
   }
 });
 
+test("grammar entry allows slashes in literals and escaped in regex terminals", async () => {
+  const runtime = await loadGrammarGuidance();
+  const tokens = ["</a>", "b/c", "<\\/a>", "b\\/c"];
+  const interpreter = runtime.createInterpreter({
+    tokenizer: tokenizer(runtime, tokens),
+    grammar: String.raw`start: "</a>" /b\/c/`,
+  });
+  assert.deepEqual(
+    tokens.map((_, token) => allowed(interpreter.computeMask(), token)),
+    [true, false, false, false],
+  );
+  interpreter.commitToken(0);
+  assert.deepEqual(
+    tokens.map((_, token) => allowed(interpreter.computeMask(), token)),
+    [false, true, false, false],
+  );
+  interpreter.commitToken(1);
+  assert.equal(allowed(interpreter.computeMask(), tokens.length), true);
+});
+
 test("grammar entry captures survive clone and rollback", async () => {
   const runtime = await loadGrammarGuidance();
   const interpreter = runtime.createInterpreter({

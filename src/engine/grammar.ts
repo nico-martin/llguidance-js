@@ -510,7 +510,7 @@ class ExpressionParser {
           const regex = this.source.slice(start, this.index++);
           if (/^[A-Za-z]/.test(this.peek() ?? ""))
             this.fail("regex flags are unsupported");
-          return this.grammar.terminal(regex)!;
+          return this.grammar.terminal(unescapeSlashes(regex))!;
         }
       }
       escaped = !escaped && char === "\\";
@@ -552,6 +552,13 @@ function logicalLines(source: string): string[] {
   return result;
 }
 
+/** Lark regexes escape their delimiter as `\/`; the regex engine needs `/`. */
+function unescapeSlashes(regex: string): string {
+  return regex.replace(/\\(.)/gs, (escape, char: string) =>
+    char === "/" ? "/" : escape,
+  );
+}
+
 function stripComment(line: string): string {
   let quoted = false;
   let regex = false;
@@ -568,5 +575,5 @@ function stripComment(line: string): string {
 }
 
 function regexEscape(value: string): string {
-  return value.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
