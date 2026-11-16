@@ -46,7 +46,7 @@ See [JSON_SCHEMA_PROFILE.md](JSON_SCHEMA_PROFILE.md) for the supported profile.
 
 ## Grammar Engine
 
-The optional grammar engine parses its documented Lark subset into productions and incrementally evaluates them with an Earley-style chart. Literal and regex terminals reuse the regex NFA, while rule completions retain byte spans for captures.
+The optional grammar engine parses its documented Lark subset into productions and incrementally evaluates them with an Earley-style chart. Literal and regex terminals reuse the regex NFA, and `%json` values reuse a compiled JSON Schema program as a byte-level terminal: the chart advances its incremental UTF-8 state like an NFA state and completes the item whenever the schema accepts the document. Rule completions retain byte spans for captures.
 
 See [GRAMMAR_SUPPORT.md](GRAMMAR_SUPPORT.md) for syntax and capture semantics.
 
@@ -93,7 +93,7 @@ Callers should treat schema objects as immutable.
 
 ## Static Bundles
 
-The root entry injects the regex and JSON compilers. The `llguidance/regex`, `llguidance/json-schema`, and `llguidance/grammar` entries inject only their required compilers and therefore have no static dependency on excluded implementations; the grammar entry reuses the regex terminal compiler but not the JSON engine. They do not use dynamic imports. Constructing an interpreter for an excluded format throws explicitly.
+The root entry injects the regex and JSON compilers. The `llguidance/regex`, `llguidance/json-schema`, and `llguidance/grammar` entries inject only their required compilers and therefore have no static dependency on excluded implementations; the grammar entry reuses the regex terminal compiler and, for `%json` rules, the JSON Schema compiler. They do not use dynamic imports. Constructing an interpreter for an excluded format throws explicitly.
 
 ## Lifecycle
 

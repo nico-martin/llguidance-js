@@ -65,6 +65,7 @@ path can also be supplied through `JSON_SCHEMA_TEST_SUITE`.
 
 ```bash
 pnpm run bench:mask
+pnpm run bench:grammar
 ```
 
 Benchmark results are non-contractual and depend on the host runtime. See [PERFORMANCE.md](PERFORMANCE.md).
