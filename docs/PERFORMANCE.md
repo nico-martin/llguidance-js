@@ -14,6 +14,12 @@ For the synthetic 4,096-token benchmark in `scripts/benchmark-mask.mjs`:
 
 The ratio is specific to the benchmark's shared-prefix vocabulary and is not a universal speedup claim.
 
+The trie and the token bytes live in a few typed arrays rather than one object
+per node and one array per token: 9 bytes per trie node, plus one byte per token
+byte and 8 bytes per token (its offset and its trie terminal entry). For Qwen3.5's 248,077-token vocabulary
+(591,826 trie nodes), the tokenizer state retains about 9 MB, where an object
+per node retained about 300 MB of JavaScript heap.
+
 ## Mask Cache
 
 Repeated `computeMask()` calls without a successful commit reuse an interpreter-local cached result and perform no grammar transitions. Returned masks are cloned to isolate callers from the cache.

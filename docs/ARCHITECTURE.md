@@ -15,7 +15,7 @@ Callers must use separate interpreters for batch rows, beams, or forks.
 
 ## Tokenizer Trie
 
-`LLGuidanceTokenizer` normalizes the vocabulary into immutable raw byte arrays and builds one byte trie. Trie terminals retain every token ID, including IDs with duplicate byte sequences.
+`LLGuidanceTokenizer` copies the vocabulary into one immutable byte buffer with per-token offsets and builds one byte trie. The trie is stored in flat typed arrays, numbered breadth-first so each node's children are consecutive: a child range and edge byte per node, and a range of terminal token IDs. Trie terminals retain every token ID, including IDs with duplicate byte sequences.
 
 Regex masking traverses the trie while carrying one NFA state per shared byte prefix. Nonviable branches are pruned before their descendant tokens are considered.
 
