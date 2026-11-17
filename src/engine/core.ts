@@ -101,16 +101,31 @@ type Engine =
   | { kind: "regex"; compiled: CompiledRegex; state: RegexState }
   | { kind: "json"; compiled: JsonMaskCompiler; state: JsonEngineState };
 
-type TokenTrieNode = {
-  children: Map<number, TokenTrieNode> | null;
-  readonly childBytes: number[];
-  readonly childNodes: TokenTrieNode[];
-  readonly terminalTokenIds: number[];
+/**
+ * Byte trie of token byte sequences in flat typed arrays, numbered
+ * breadth-first: node 0 is the root and the children of node `n` are nodes
+ * `childStart[n]` to `childStart[n + 1] - 1`, in first-appearance order.
+ * `nodeByte[n]` is the byte on the edge into node `n`, and the tokens ending at
+ * node `n` are `terminalTokenIds[terminalStart[n]]` to
+ * `terminalTokenIds[terminalStart[n + 1] - 1]`, in ascending token order.
+ */
+type TokenTrie = {
+  readonly childStart: Uint32Array;
+  readonly nodeByte: Uint8Array;
+  readonly terminalStart: Uint32Array;
+  readonly terminalTokenIds: Uint32Array;
+};
+
+/** Every token's bytes in one buffer: token `id` is `bytes[offsets[id]]` to `bytes[offsets[id + 1] - 1]`. */
+type TokenBytes = {
+  readonly bytes: Uint8Array;
+  readonly offsets: Uint32Array;
 };
 
 type TokenizerData = {
-  readonly tokenBytes: readonly Uint8Array[];
-  readonly trie: TokenTrieNode;
+  readonly tokens: TokenBytes;
+  readonly vocabSize: number;
+  readonly trie: TokenTrie;
   readonly eos: number;
   readonly special: ReadonlySet<number>;
   readonly maxNormalTokenBytes: number;
@@ -118,7 +133,7 @@ type TokenizerData = {
   readonly openStringSafeMask: Uint32Array;
   readonly openStringSafeCount: number;
   /** Prefix-sharing trie for normal tokens that need a parser transition in an open JSON string. */
-  readonly openStringExceptionalTrie: TokenTrieNode;
+  readonly openStringExceptionalTrie: TokenTrie;
 };
 
 export type StopReason = "accepted" | "dead_end";
@@ -193,12 +208,15 @@ export class LLGuidanceTokenizer {
     }
 
     if (config.tokens === undefined) {
-      const tokens = Array.from({ length: 262 }, (_, id) =>
-        id < 256 ? Uint8Array.of(id) : new Uint8Array(0),
+      const tokens = flattenTokens(
+        Array.from({ length: 262 }, (_, id) =>
+          id < 256 ? Uint8Array.of(id) : new Uint8Array(0),
+        ),
       );
       const special = new Set([256, 257, 258, 259, 260, 261]);
       tokenizerData.set(this, {
-        tokenBytes: tokens,
+        tokens,
+        vocabSize: 262,
         trie: buildTokenTrie(tokens),
         eos: 261,
         special,
@@ -213,16 +231,15 @@ export class LLGuidanceTokenizer {
         "tokens must be a non-empty array of raw byte arrays",
       );
     }
-    const tokenBytes = config.tokens.map((token, tokenId) =>
-      normalizeTokenBytes(token, tokenId),
-    );
+    const tokens = flattenTokens(config.tokens);
+    const vocabSize = config.tokens.length;
     const eos = config.eosTokenId ?? config.eos_token_id;
     if (eos === undefined) {
       throw new TypeError(
         "eosTokenId is required when tokenizer tokens are provided",
       );
     }
-    assertTokenId(eos, tokenBytes.length, "eos token id");
+    assertTokenId(eos, vocabSize, "eos token id");
 
     const configuredSpecials =
       config.specialTokenIds ?? config.special_token_ids ?? [];
@@ -231,27 +248,28 @@ export class LLGuidanceTokenizer {
     }
     const special = new Set<number>([eos]);
     for (const id of configuredSpecials) {
-      assertTokenId(id, tokenBytes.length, "special token id");
+      assertTokenId(id, vocabSize, "special token id");
       special.add(id);
     }
     const bos = config.bosTokenId ?? config.bos_token_id;
     if (bos !== undefined) {
-      assertTokenId(bos, tokenBytes.length, "bos token id");
+      assertTokenId(bos, vocabSize, "bos token id");
       special.add(bos);
     }
     tokenizerData.set(this, {
-      tokenBytes,
-      trie: buildTokenTrie(tokenBytes),
+      tokens,
+      vocabSize,
+      trie: buildTokenTrie(tokens),
       eos,
       special,
-      maxNormalTokenBytes: maxNormalTokenBytes(tokenBytes, special),
-      ...openStringTokenData(tokenBytes, special),
+      maxNormalTokenBytes: maxNormalTokenBytes(tokens, special),
+      ...openStringTokenData(tokens, special),
     });
   }
 
   vocabSize(): number {
     this.assertLive();
-    return getTokenizerData(this).tokenBytes.length;
+    return getTokenizerData(this).vocabSize;
   }
 
   eosToken(): number {
@@ -269,13 +287,16 @@ export class LLGuidanceTokenizer {
 
   token(id: number): Uint8Array {
     this.assertLive();
-    return getTokenizerData(this).tokenBytes[id].slice();
+    const { tokens, vocabSize } = getTokenizerData(this);
+    assertTokenId(id, vocabSize, "token id");
+    return tokens.bytes.slice(tokens.offsets[id], tokens.offsets[id + 1]);
   }
 
   isSpecial(id: number): boolean {
     this.assertLive();
     const data = getTokenizerData(this);
-    return data.special.has(id) || data.tokenBytes[id].length === 0;
+    assertTokenId(id, data.vocabSize, "token id");
+    return isSpecialToken(data, id);
   }
 
   private assertLive(): void {
@@ -293,7 +314,7 @@ class CoreLLGuidanceInterpreter {
   private limits: NormalizedGuidanceLimits;
   private generatedTokens = 0;
   private generatedBytes = 0;
-  private trieNodes: TokenTrieNode[] = [];
+  private trieNodes: number[] = [];
   private trieStates: Array<RegexState | JsonEngineState> = [];
   private pendingToken = -1;
   private pendingState: RegexState | JsonEngineState | null = null;
@@ -423,7 +444,7 @@ class CoreLLGuidanceInterpreter {
       return { stop: true, backtrack: 0, ffTokens: [] };
     }
 
-    const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    const bytes = tokenView(getTokenizerData(this.tokenizer).tokens, token);
     if (this.nonEosTokenCount() >= this.limits.maxTokens) {
       throw new Error(
         `generation exceeds maxTokens (${this.limits.maxTokens})`,
@@ -584,7 +605,7 @@ class CoreLLGuidanceInterpreter {
         this.stopped = true;
         continue;
       }
-      const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+      const bytes = tokenView(getTokenizerData(this.tokenizer).tokens, token);
       this.generatedTokens += 1;
       this.generatedBytes += bytes.length;
       if (this.engine.kind === "regex") {
@@ -613,26 +634,38 @@ class CoreLLGuidanceInterpreter {
       eligible += 1;
     }
 
+    const { childStart, nodeByte, terminalStart, terminalTokenIds } = data.trie;
+    const offsets = data.tokens.offsets;
     const nodes = this.trieNodes;
     const states = this.trieStates;
     let stackLength = 1;
-    nodes[0] = data.trie;
+    nodes[0] = 0;
     states[0] = state;
     while (stackLength !== 0) {
       stackLength -= 1;
       const node = nodes[stackLength];
       const currentState = states[stackLength] as RegexState;
-      for (const token of node.terminalTokenIds) {
+      for (
+        let index = terminalStart[node], end = terminalStart[node + 1];
+        index < end;
+        index += 1
+      ) {
+        const token = terminalTokenIds[index];
         if (token === data.eos || isSpecialToken(data, token)) continue;
-        if (!this.withinGenerationLimits(data.tokenBytes[token].length))
+        if (!this.withinGenerationLimits(offsets[token + 1] - offsets[token]))
           continue;
         setMaskBit(mask, token);
         eligible += 1;
       }
-      for (let index = 0; index < node.childNodes.length; index += 1) {
-        const child = node.childNodes[index];
-        const byte = node.childBytes[index];
-        const candidate = compiled.advance(currentState, singleBytes[byte]);
+      for (
+        let child = childStart[node], end = childStart[node + 1];
+        child < end;
+        child += 1
+      ) {
+        const candidate = compiled.advance(
+          currentState,
+          singleBytes[nodeByte[child]],
+        );
         if (!compiled.viable(candidate)) continue;
         nodes[stackLength] = child;
         states[stackLength] = candidate;
@@ -651,64 +684,95 @@ class CoreLLGuidanceInterpreter {
     if (this.engine.kind !== "json") throw new Error("invalid JSON engine");
     const data = getTokenizerData(this.tokenizer);
     const { compiled, state } = this.engine;
-    if (this.canUseOpenStringFastPath(data, compiled, state, semantic)) {
-      mask.set(data.openStringSafeMask);
-      let eligible = data.openStringSafeCount;
-      const nodes = this.trieNodes;
-      const states = this.trieStates;
-      let stackLength = 1;
-      nodes[0] = data.openStringExceptionalTrie;
-      states[0] = state;
-      while (stackLength !== 0) {
-        stackLength -= 1;
-        const node = nodes[stackLength];
-        const currentState = states[stackLength] as JsonEngineState;
-        for (const token of node.terminalTokenIds) {
-          setMaskBit(mask, token);
-          eligible += 1;
-        }
-        for (let index = 0; index < node.childNodes.length; index += 1) {
-          const candidate = compiled.appendUtf8(
-            currentState,
-            singleBytes[node.childBytes[index]],
-          );
-          if (!compiled.viable(candidate)) continue;
-          nodes[stackLength] = node.childNodes[index];
-          states[stackLength] = candidate;
-          stackLength += 1;
-        }
-      }
-      nodes.length = 0;
-      states.length = 0;
-      return eligible;
-    }
+    if (this.canUseOpenStringFastPath(data, compiled, state, semantic))
+      return this.computeOpenStringMask(mask, data, compiled, state);
     let eligible = 0;
     if (compiled.accepting(state)) {
       setMaskBit(mask, data.eos);
       eligible += 1;
     }
 
+    const { childStart, nodeByte, terminalStart, terminalTokenIds } = data.trie;
+    const offsets = data.tokens.offsets;
     const nodes = this.trieNodes;
     const states = this.trieStates;
     let stackLength = 1;
-    nodes[0] = data.trie;
+    nodes[0] = 0;
     states[0] = state;
     while (stackLength !== 0) {
       stackLength -= 1;
       const node = nodes[stackLength];
       this.sharedJsonMasks?.recordTrieNode();
       const currentState = states[stackLength] as JsonEngineState;
-      for (const token of node.terminalTokenIds) {
+      for (
+        let index = terminalStart[node], end = terminalStart[node + 1];
+        index < end;
+        index += 1
+      ) {
+        const token = terminalTokenIds[index];
         if (token === data.eos || isSpecialToken(data, token)) continue;
-        if (!this.withinGenerationLimits(data.tokenBytes[token].length))
+        if (!this.withinGenerationLimits(offsets[token + 1] - offsets[token]))
           continue;
         setMaskBit(mask, token);
         eligible += 1;
       }
-      for (let index = 0; index < node.childNodes.length; index += 1) {
-        const child = node.childNodes[index];
-        const byte = node.childBytes[index];
-        const candidate = compiled.appendUtf8(currentState, singleBytes[byte]);
+      for (
+        let child = childStart[node], end = childStart[node + 1];
+        child < end;
+        child += 1
+      ) {
+        const candidate = compiled.appendUtf8(
+          currentState,
+          singleBytes[nodeByte[child]],
+        );
+        if (!compiled.viable(candidate)) continue;
+        nodes[stackLength] = child;
+        states[stackLength] = candidate;
+        stackLength += 1;
+      }
+    }
+    nodes.length = 0;
+    states.length = 0;
+    return eligible;
+  }
+
+  /** An open JSON string: every safe token, plus the exceptional tokens the parser takes. */
+  private computeOpenStringMask(
+    mask: Uint32Array,
+    data: TokenizerData,
+    compiled: JsonMaskCompiler,
+    state: JsonEngineState,
+  ): number {
+    mask.set(data.openStringSafeMask);
+    let eligible = data.openStringSafeCount;
+    const { childStart, nodeByte, terminalStart, terminalTokenIds } =
+      data.openStringExceptionalTrie;
+    const nodes = this.trieNodes;
+    const states = this.trieStates;
+    let stackLength = 1;
+    nodes[0] = 0;
+    states[0] = state;
+    while (stackLength !== 0) {
+      stackLength -= 1;
+      const node = nodes[stackLength];
+      const currentState = states[stackLength] as JsonEngineState;
+      for (
+        let index = terminalStart[node], end = terminalStart[node + 1];
+        index < end;
+        index += 1
+      ) {
+        setMaskBit(mask, terminalTokenIds[index]);
+        eligible += 1;
+      }
+      for (
+        let child = childStart[node], end = childStart[node + 1];
+        child < end;
+        child += 1
+      ) {
+        const candidate = compiled.appendUtf8(
+          currentState,
+          singleBytes[nodeByte[child]],
+        );
         if (!compiled.viable(candidate)) continue;
         nodes[stackLength] = child;
         states[stackLength] = candidate;
@@ -741,7 +805,7 @@ class CoreLLGuidanceInterpreter {
     if (token === this.tokenizer.eosToken()) return this.accepting();
     if (this.tokenizer.isSpecial(token)) return false;
 
-    const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    const bytes = tokenView(getTokenizerData(this.tokenizer).tokens, token);
     if (this.nonEosTokenCount() >= this.limits.maxTokens) return false;
     if (this.outputByteLength() + bytes.length > this.limits.maxOutputBytes) {
       return false;
@@ -763,7 +827,7 @@ class CoreLLGuidanceInterpreter {
   private candidateAllowed(token: number): boolean {
     if (token === this.tokenizer.eosToken()) return this.accepting();
     if (this.tokenizer.isSpecial(token)) return false;
-    const bytes = getTokenizerData(this.tokenizer).tokenBytes[token];
+    const bytes = tokenView(getTokenizerData(this.tokenizer).tokens, token);
     if (!this.withinGenerationLimits(bytes.length)) return false;
     if (this.engine.kind === "regex") {
       return this.engine.compiled.viable(
@@ -1212,84 +1276,181 @@ function snapshotSchema(schema: unknown): unknown {
   return JSON.parse(serializedSchemaKey(schema)) as unknown;
 }
 
-function normalizeTokenBytes(
-  token: Uint8Array | readonly number[],
-  tokenId: number,
-): Uint8Array {
-  if (!(token instanceof Uint8Array) && !Array.isArray(token)) {
-    throw new TypeError(`token ${tokenId} must be a raw byte array`);
+function flattenTokens(
+  tokens: ReadonlyArray<Uint8Array | readonly number[]>,
+): TokenBytes {
+  let total = 0;
+  for (let tokenId = 0; tokenId < tokens.length; tokenId += 1) {
+    const token = tokens[tokenId];
+    if (token instanceof Uint8Array) {
+      total += token.length;
+      continue;
+    }
+    if (!Array.isArray(token)) {
+      throw new TypeError(`token ${tokenId} must be a raw byte array`);
+    }
+    for (let index = 0; index < token.length; index += 1) {
+      const byte = token[index];
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new RangeError(`token ${tokenId} contains a byte out of range`);
+      }
+    }
+    total += token.length;
   }
-  const values = Array.from(token);
-  if (
-    values.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)
-  ) {
-    throw new RangeError(`token ${tokenId} contains a byte out of range`);
+  const bytes = new Uint8Array(total);
+  const offsets = new Uint32Array(tokens.length + 1);
+  let at = 0;
+  for (let tokenId = 0; tokenId < tokens.length; tokenId += 1) {
+    const token = tokens[tokenId];
+    offsets[tokenId] = at;
+    bytes.set(token, at);
+    at += token.length;
   }
-  return Uint8Array.from(values);
+  offsets[tokens.length] = at;
+  return { bytes, offsets };
 }
 
+function tokenView(tokens: TokenBytes, token: number): Uint8Array {
+  return tokens.bytes.subarray(
+    tokens.offsets[token],
+    tokens.offsets[token + 1],
+  );
+}
+
+/** Children a trie node collects before lookups use a 256-entry table while building. */
+const TRIE_BUILD_TABLE_AT = 16;
+
 function buildTokenTrie(
-  tokens: readonly Uint8Array[],
-  tokenIds?: readonly number[],
-): TokenTrieNode {
-  const makeNode = (): TokenTrieNode => ({
-    children: new Map(),
-    childBytes: [],
-    childNodes: [],
-    terminalTokenIds: [],
-  });
-  const root = makeNode();
-  const ids = tokenIds ?? tokens.map((_, tokenId) => tokenId);
-  for (const tokenId of ids) {
-    const bytes = tokens[tokenId];
-    let node = root;
-    for (const byte of bytes) {
-      let child = node.children!.get(byte);
-      if (child === undefined) {
-        child = makeNode();
-        node.children!.set(byte, child);
+  tokens: TokenBytes,
+  tokenIds?: ArrayLike<number>,
+): TokenTrie {
+  const { bytes, offsets } = tokens;
+  const count = tokenIds === undefined ? offsets.length - 1 : tokenIds.length;
+  const idAt = (index: number) =>
+    tokenIds === undefined ? index : tokenIds[index];
+  let maxNodes = 1;
+  for (let index = 0; index < count; index += 1) {
+    const tokenId = idAt(index);
+    maxNodes += offsets[tokenId + 1] - offsets[tokenId];
+  }
+
+  // Build with sibling lists in creation order (node 0 is the root, so 0 also
+  // means "none"); nodes with many children also get a byte-indexed table.
+  const byteOf = new Uint8Array(maxNodes);
+  const firstChild = new Uint32Array(maxNodes);
+  const lastChild = new Uint32Array(maxNodes);
+  const nextSibling = new Uint32Array(maxNodes);
+  const childCount = new Uint16Array(maxNodes);
+  const tableOf = new Uint32Array(maxNodes);
+  const tables: Uint32Array[] = [];
+  const terminalNode = new Uint32Array(count);
+  let nodeCount = 1;
+  for (let index = 0; index < count; index += 1) {
+    const tokenId = idAt(index);
+    let node = 0;
+    for (let at = offsets[tokenId]; at < offsets[tokenId + 1]; at += 1) {
+      const byte = bytes[at];
+      const table = tableOf[node];
+      let child: number;
+      if (table !== 0) {
+        child = tables[table - 1][byte];
+      } else {
+        child = firstChild[node];
+        while (child !== 0 && byteOf[child] !== byte)
+          child = nextSibling[child];
+      }
+      if (child === 0) {
+        child = nodeCount;
+        nodeCount += 1;
+        byteOf[child] = byte;
+        if (firstChild[node] === 0) firstChild[node] = child;
+        else nextSibling[lastChild[node]] = child;
+        lastChild[node] = child;
+        childCount[node] += 1;
+        if (table !== 0) {
+          tables[table - 1][byte] = child;
+        } else if (childCount[node] === TRIE_BUILD_TABLE_AT) {
+          const created = new Uint32Array(256);
+          for (
+            let item = firstChild[node];
+            item !== 0;
+            item = nextSibling[item]
+          )
+            created[byteOf[item]] = item;
+          tables.push(created);
+          tableOf[node] = tables.length;
+        }
       }
       node = child;
     }
-    node.terminalTokenIds.push(tokenId);
+    terminalNode[index] = node;
   }
-  const pending = [root];
-  while (pending.length !== 0) {
-    const node = pending.pop()!;
-    for (const [byte, child] of node.children!) {
-      node.childBytes.push(byte);
-      node.childNodes.push(child);
-      pending.push(child);
+
+  // Renumber breadth-first so that each node's children are consecutive.
+  const order = new Uint32Array(nodeCount);
+  const renumbered = new Uint32Array(nodeCount);
+  const childStart = new Uint32Array(nodeCount + 1);
+  const nodeByte = new Uint8Array(nodeCount);
+  let tail = 1;
+  for (let head = 0; head < nodeCount; head += 1) {
+    const node = order[head];
+    renumbered[node] = head;
+    nodeByte[head] = byteOf[node];
+    childStart[head] = tail;
+    for (
+      let child = firstChild[node];
+      child !== 0;
+      child = nextSibling[child]
+    ) {
+      order[tail] = child;
+      tail += 1;
     }
-    node.children = null;
   }
-  return root;
+  childStart[nodeCount] = tail;
+
+  const terminalStart = new Uint32Array(nodeCount + 1);
+  for (let index = 0; index < count; index += 1)
+    terminalStart[renumbered[terminalNode[index]] + 1] += 1;
+  for (let node = 0; node < nodeCount; node += 1)
+    terminalStart[node + 1] += terminalStart[node];
+  const terminalTokenIds = new Uint32Array(count);
+  const cursor = order;
+  cursor.set(terminalStart.subarray(0, nodeCount));
+  for (let index = 0; index < count; index += 1) {
+    const node = renumbered[terminalNode[index]];
+    terminalTokenIds[cursor[node]] = idAt(index);
+    cursor[node] += 1;
+  }
+  return { childStart, nodeByte, terminalStart, terminalTokenIds };
 }
 
 function maxNormalTokenBytes(
-  tokens: readonly Uint8Array[],
+  tokens: TokenBytes,
   special: ReadonlySet<number>,
 ): number {
+  const { offsets } = tokens;
   let maximum = 0;
-  for (let token = 0; token < tokens.length; token += 1) {
-    if (!special.has(token) && tokens[token].length !== 0)
-      maximum = Math.max(maximum, tokens[token].length);
+  for (let token = 0; token < offsets.length - 1; token += 1) {
+    const length = offsets[token + 1] - offsets[token];
+    if (!special.has(token) && length !== 0)
+      maximum = Math.max(maximum, length);
   }
   return maximum;
 }
 
 function openStringTokenData(
-  tokens: readonly Uint8Array[],
+  tokens: TokenBytes,
   special: ReadonlySet<number>,
 ): Pick<
   TokenizerData,
   "openStringSafeMask" | "openStringSafeCount" | "openStringExceptionalTrie"
 > {
-  const openStringSafeMask = new Uint32Array(Math.ceil(tokens.length / 32));
+  const vocabSize = tokens.offsets.length - 1;
+  const openStringSafeMask = new Uint32Array(Math.ceil(vocabSize / 32));
   const openStringExceptionalTokens: number[] = [];
   let openStringSafeCount = 0;
-  for (let token = 0; token < tokens.length; token += 1) {
-    const bytes = tokens[token];
+  for (let token = 0; token < vocabSize; token += 1) {
+    const bytes = tokenView(tokens, token);
     if (special.has(token) || bytes.length === 0) continue;
     if (isSafeOpenJsonStringToken(bytes)) {
       setMaskBit(openStringSafeMask, token);
@@ -1348,7 +1509,8 @@ function getTokenizerData(tokenizer: LLGuidanceTokenizer): TokenizerData {
 }
 
 function isSpecialToken(data: TokenizerData, token: number): boolean {
-  return data.special.has(token) || data.tokenBytes[token].length === 0;
+  const offsets = data.tokens.offsets;
+  return data.special.has(token) || offsets[token + 1] === offsets[token];
 }
 
 function setMaskBit(mask: Uint32Array, token: number): void {

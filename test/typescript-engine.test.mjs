@@ -166,6 +166,55 @@ test("regex trie preserves duplicate terminals and per-id special handling", () 
   assert.equal(allowed(interpreter.computeMask(), 8), true);
 });
 
+test("flat trie keeps wide nodes, shared token buffers and token ids exact", () => {
+  // Every byte, then "a" + each letter, then "a" + each letter + "z": the root
+  // and the "a" node have far more children than a sibling scan is used for.
+  const letters = Array.from({ length: 26 }, (_, index) => 97 + index);
+  const texts = [
+    ...Array.from({ length: 256 }, (_, byte) => [byte]),
+    ...letters.map((letter) => [97, letter]),
+    ...letters.map((letter) => [97, letter, 122]),
+    [97, 99],
+  ];
+  // Tokens given as views into one buffer, as tokenizer bridges often pass them.
+  const shared = new Uint8Array(texts.reduce((sum, t) => sum + t.length, 0));
+  let at = 0;
+  const tokens = texts.map((text) => {
+    shared.set(text, at);
+    at += text.length;
+    return shared.subarray(at - text.length, at);
+  });
+  tokens.push(new Uint8Array(0));
+  const eos = tokens.length - 1;
+  const tokenizer = new LLGuidanceTokenizer({ tokens, eosTokenId: eos });
+  shared.fill(0);
+  for (let id = 0; id < texts.length; id += 1)
+    assert.deepEqual(tokenizer.token(id), Uint8Array.from(texts[id]));
+  assert.deepEqual(tokenizer.token(eos), new Uint8Array(0));
+  assert.equal(tokenizer.isSpecial(eos), true);
+  assert.equal(tokenizer.isSpecial(97), false);
+  assert.throws(() => tokenizer.token(tokens.length), RangeError);
+  assert.throws(() => tokenizer.isSpecial(-1), RangeError);
+
+  const interpreter = new LLGuidanceInterpreter(tokenizer, {
+    grammar: grammarFromRegex("a[c-x]z?"),
+  });
+  const decoded = texts.map((text) => String.fromCharCode(...text));
+  const prefixOfMatch = (text) => text === "a" || /^a[c-x]z?$/.test(text);
+  const mask = interpreter.computeMask();
+  assert.deepEqual(
+    tokens.map((_, token) => allowed(mask, token)),
+    [...decoded.map(prefixOfMatch), false],
+  );
+
+  interpreter.commitToken(texts.length - 1);
+  const next = interpreter.computeMask();
+  assert.deepEqual(
+    tokens.flatMap((_, token) => (allowed(next, token) ? [token] : [])),
+    [122, eos],
+  );
+});
+
 test("JSON trie deduplicates complete byte sequences without merging token ids", () => {
   const text = [...encoder.encode('"x"')];
   const tokenizer = llguidance.createTokenizer({
